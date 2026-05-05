@@ -654,7 +654,7 @@ Difftest:         220/220
 | 1j | List ordering comparison | — | 4 | guard in `Comparison(Lt/Le/Gt/Ge)` handler | ❌ list ordering semantics; falls back |
 | 3 | UNWIND of non-literal / variable list | 116 | 91 | `clauses.rs` UNWIND lowering | ⏳ **DEFERRED to Phase L2** — correct implementation requires Continuation (runtime list → VALUES); porting GROUP_CONCAT string would be overwritten by L2 |
 | 4 | Temporal constructors (datetime/localdatetime/date/time/localtime/duration) | 199 | 14 | `temporal.rs` | ✅ DONE (−185) |
-| 5 | Named path `MATCH p = …` | 87 | 87 | `patterns.rs` — emits BGP chain, records path variable | ✅ portable |
+| 5 | Named path `MATCH p = …` | 87 | ~44 remaining | `patterns.rs` — emits BGP chain, records path variable | ✅ **DONE** — fixed-hop paths route through LQA; varlen/real-agg/path-value-projection still legacy |
 | 6 | `collect()` aggregate | 57 | 57 | `return_proj.rs` — emits `GROUP_CONCAT` | ⏳ **DEFERRED to Phase L2** — L2 will return a typed list; porting GROUP_CONCAT now means L2 overwrites the same arm |
 | 7 | `range(start, end[, step])` | 53 | 26 | `mod.rs` function dispatch | ✅ DONE for literal args (−27); 26 non-literal remain |
 | 8 | `relvar_after_with` / varlen named relvar / unbounded varlen unlabeled | 41 | 41 | `is_lqa_safe` guards | ✅ portable for relvar_after_with (port leg. treatment); `unbounded_varlen_unlabeled` (9) in failing set → keep guard |
@@ -671,6 +671,7 @@ Difftest:         220/220
 | 2026-05-05 | 7 — range() literal args | −27 | 3 difftest queries added |
 | 2026-05-05 | 3 — UNWIND keys(n/r) | −7 | UNWIND keys() node + rel RDF-star; 4 difftest queries added |
 | 2026-05-05 | 11 — keys() IN expression | −1 | 'literal' IN keys(node_var) → EXISTS { ?n <base:prop> ?_kv } |
+| 2026-05-05 | 5 — named path (fixed-hop) | ~43 LQA-routed | removed `named_path` guard; added `named_path_varlen` + `named_path_with_real_agg` guards; `count(p)→COUNT(*)`, `nodes(p)→CONCAT`, `RETURN p→Err`; 3 difftest queries added |
 | 2026-05-05 | 1+2 — Expr::List + Expr::Map | −59 net | String serialisation ported; null/ordering/dynamic-concat guards added; 4 difftest queries added (224 total) |
 
 **Ordered queue (next-up first):**
@@ -678,9 +679,7 @@ Difftest:         220/220
 Permanent constructs only — L2-deferred buckets (3, 6, 9) are NOT in this queue:
 
 1. ~~**Buckets 1+2 — `Expr::List` and `Expr::Map`** (272). DONE — −59 net.~~
-2. **Bucket 5 — named path** (87). Read [src/translator/cypher/patterns.rs](../src/translator/cypher/patterns.rs)
-   path tracking. Remove the `named_path` guard in `lqa_safe_reason` and
-   teach `lower_op(Scan/Expand)` to record the path variable binding.
+2. ~~**Bucket 5 — named path** (87). DONE — ~43 queries now LQA-routed.~~
 3. **Bucket 8 — `relvar_after_with`** (19 of 41). Port legacy's treatment of
    relationship variables that cross a WITH boundary. The `varlen_named_relvar` (12)
    and `unbounded_varlen_unlabeled` (9) sub-buckets map to failing scenarios — keep those guards.
