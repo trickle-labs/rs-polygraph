@@ -1693,6 +1693,10 @@ impl Compiler {
                     if has_null {
                         self.unwind_null_vars.insert(variable.clone());
                     }
+                    // Track the UNWIND variable so projection collision detection
+                    // (RETURN expr AS same_alias) can issue a subquery-isolation path
+                    // instead of the Oxigraph "SELECT overrides existing variable" error.
+                    self.scan_vars.insert(variable.clone());
                     let values = GraphPattern::Values {
                         variables: vec![var],
                         bindings,
@@ -3367,6 +3371,19 @@ impl Compiler {
                         }
                     }
                 }
+                // If the argument variable is a node (in scan_vars but not an edge),
+                // type() on a node is a static InvalidArgumentType — raise Translation.
+                if let Some(Expr::Variable { name: rv, .. }) = args.first() {
+                    if self.scan_vars.contains(rv.as_str())
+                        && !self.edge_types.contains_key(rv.as_str())
+                    {
+                        return Err(PolygraphError::Translation {
+                            message: format!(
+                                "type() applied to node variable '{rv}'; expected a relationship"
+                            ),
+                        });
+                    }
+                }
                 Err(PolygraphError::Unsupported {
                     construct: "type(r) with unknown/multiple edge types".into(),
                     spec_ref: "openCypher 9 §6.3.2".into(),
@@ -3497,11 +3514,67 @@ impl Compiler {
                         "false" => Ok(Self::lit_bool(false)),
                         _ => Ok(SparExpr::Variable(self.fresh("_tob_null"))),
                     },
-                    _ => Err(PolygraphError::Unsupported {
-                        construct: "toBoolean()".into(),
-                        spec_ref: "openCypher 9 §6.3.2".into(),
-                        reason: "toBoolean() with non-constant arg requires legacy path".into(),
-                    }),
+                    // Runtime conversion: bind arg to a probe variable, then:
+                    //   IF(!BOUND(?probe), undef,
+                    //     IF(DATATYPE(?probe) = xsd:boolean, ?probe,
+                    //       IF(LCASE(STR(?probe)) = "true", true,
+                    //         IF(LCASE(STR(?probe)) = "false", false, undef))))
+                    _ => {
+                        let lowered = self.lower_expr(arg)?;
+                        let (probe, a_expr) = if let SparExpr::Variable(ref v) = lowered {
+                            (v.clone(), lowered.clone())
+                        } else {
+                            let p = self.fresh("_tob_probe");
+                            self.pending_binds.push((p.clone(), lowered));
+                            (p.clone(), SparExpr::Variable(p))
+                        };
+                        let null_var = self.fresh("_tob_null");
+                        let lcase_str = SparExpr::FunctionCall(
+                            spargebra::algebra::Function::LCase,
+                            vec![SparExpr::FunctionCall(
+                                spargebra::algebra::Function::Str,
+                                vec![a_expr.clone()],
+                            )],
+                        );
+                        // IF(LCASE(STR(?probe)) = "false", false, undef)
+                        let inner = SparExpr::If(
+                            Box::new(SparExpr::Equal(
+                                Box::new(lcase_str.clone()),
+                                Box::new(Self::lit_str("false")),
+                            )),
+                            Box::new(Self::lit_bool(false)),
+                            Box::new(SparExpr::Variable(null_var.clone())),
+                        );
+                        // IF(LCASE(STR(?probe)) = "true", true, ...)
+                        let inner = SparExpr::If(
+                            Box::new(SparExpr::Equal(
+                                Box::new(lcase_str),
+                                Box::new(Self::lit_str("true")),
+                            )),
+                            Box::new(Self::lit_bool(true)),
+                            Box::new(inner),
+                        );
+                        // IF(DATATYPE(?probe) = xsd:boolean, ?probe, ...)
+                        let inner = SparExpr::If(
+                            Box::new(SparExpr::Equal(
+                                Box::new(SparExpr::FunctionCall(
+                                    spargebra::algebra::Function::Datatype,
+                                    vec![a_expr.clone()],
+                                )),
+                                Box::new(SparExpr::NamedNode(NamedNode::new_unchecked(
+                                    XSD_BOOLEAN,
+                                ))),
+                            )),
+                            Box::new(a_expr),
+                            Box::new(inner),
+                        );
+                        // IF(!BOUND(?probe), undef, ...)
+                        Ok(SparExpr::If(
+                            Box::new(SparExpr::Not(Box::new(SparExpr::Bound(probe)))),
+                            Box::new(SparExpr::Variable(null_var)),
+                            Box::new(inner),
+                        ))
+                    }
                 }
             }
             // Known openCypher functions that are valid but not yet implemented in the
