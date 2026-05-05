@@ -2736,10 +2736,11 @@ impl Compiler {
                 Ok(SparExpr::Subtract(Box::new(la), Box::new(floor_times_b)))
             }
             Expr::Pow(base, exp) => {
-                if let (Expr::Literal(Literal::Integer(b)), Expr::Literal(Literal::Integer(e))) =
-                    (base.as_ref(), exp.as_ref())
+                // Try full recursive constant evaluation first (handles cases like
+                // `4 ^ (3 * 2) ^ 3` and `(-3) ^ 2` that aren't bare integer literals).
+                if let Some(result) = const_eval_numeric(base)
+                    .and_then(|b| const_eval_numeric(exp).map(|e| b.powf(e)))
                 {
-                    let result = (*b as f64).powi(*e as i32);
                     if result.is_finite() {
                         return Ok(Self::lit_double(result));
                     }
@@ -3501,6 +3502,70 @@ impl Compiler {
 }
 
 // ── Free helpers ──────────────────────────────────────────────────────────────
+
+/// Recursively evaluate a pure integer constant expression using Cypher integer semantics
+/// (truncating division). Returns `None` if the expression contains any non-constant
+/// sub-expression, non-integer literals, or overflow.
+fn const_eval_integer(expr: &Expr) -> Option<i64> {
+    use crate::lqa::expr::Expr as E;
+    match expr {
+        E::Literal(Literal::Integer(n)) => Some(*n),
+        E::Unary(UnaryOp::Neg, e) => const_eval_integer(e)?.checked_neg(),
+        E::Unary(UnaryOp::Pos, e) => const_eval_integer(e),
+        E::Add(a, b) => const_eval_integer(a)?.checked_add(const_eval_integer(b)?),
+        E::Sub(a, b) => const_eval_integer(a)?.checked_sub(const_eval_integer(b)?),
+        E::Mul(a, b) => const_eval_integer(a)?.checked_mul(const_eval_integer(b)?),
+        E::Div(a, b) => {
+            let denom = const_eval_integer(b)?;
+            if denom == 0 { return None; }
+            Some(const_eval_integer(a)? / denom)
+        }
+        E::Mod(a, b) => {
+            let denom = const_eval_integer(b)?;
+            if denom == 0 { return None; }
+            Some(const_eval_integer(a)? % denom)
+        }
+        _ => None,
+    }
+}
+
+/// Recursively evaluate a pure numeric constant expression to `f64`.
+/// Sub-expressions that are purely integer-typed use integer arithmetic so that
+/// `3 / 2` yields `1.0` (Cypher integer division), not `1.5`.
+/// Returns `None` if any non-constant sub-expression is encountered.
+fn const_eval_numeric(expr: &Expr) -> Option<f64> {
+    // Fast path: if the entire expression is integer-typed, use integer semantics.
+    if let Some(n) = const_eval_integer(expr) {
+        return Some(n as f64);
+    }
+    use crate::lqa::expr::Expr as E;
+    match expr {
+        E::Literal(Literal::Float(f)) => Some(*f),
+        E::Unary(UnaryOp::Neg, e) => Some(-const_eval_numeric(e)?),
+        E::Unary(UnaryOp::Pos, e) => const_eval_numeric(e),
+        E::Add(a, b) => Some(const_eval_numeric(a)? + const_eval_numeric(b)?),
+        E::Sub(a, b) => Some(const_eval_numeric(a)? - const_eval_numeric(b)?),
+        E::Mul(a, b) => Some(const_eval_numeric(a)? * const_eval_numeric(b)?),
+        E::Div(a, b) => {
+            // Each operand is evaluated with its own type (integer-first semantics).
+            // If one side is a float literal, the result is floating-point.
+            let denom = const_eval_numeric(b)?;
+            if denom == 0.0 { return None; }
+            Some(const_eval_numeric(a)? / denom)
+        }
+        E::Mod(a, b) => {
+            let denom = const_eval_numeric(b)?;
+            if denom == 0.0 { return None; }
+            Some(const_eval_numeric(a)? % denom)
+        }
+        E::Pow(a, b) => {
+            let base = const_eval_numeric(a)?;
+            let exp = const_eval_numeric(b)?;
+            Some(base.powf(exp))
+        }
+        _ => None,
+    }
+}
 
 /// Returns `true` if `var` appears as a direct operand to an arithmetic
 /// operator (`%`, `/`, `*`, `-`, `^`) anywhere in `expr`.
