@@ -1,7 +1,7 @@
 # Spec-First Pivot — From TCK-Driven Patches to Semantics-Driven Translation
 
 **Status**: in progress
-**Updated**: 2026-05-11 (Phase 7 in progress: Bucket 4 temporal done, Bucket 7 range() done, keys() done, Buckets 1+2 Expr::List/Map done; TCK 3757/3828; difftest 224/224; read fallbacks 545 lqa_compile=Unsupported — see Phase 7 progress)
+**Updated**: 2026-05-05 (Phase 7 in progress: Bucket 4 temporal done, Bucket 7 range() done, keys() done, Buckets 1+2 Expr::List/Map done; TCK 3757/3828; difftest 224/224; read fallbacks 545 lqa_compile=Unsupported — see Phase 7 progress)
 
 This plan replaces the project's *de facto* methodology — "find the next failing
 TCK scenario, patch the translator until it passes" — with a spec-anchored,
@@ -563,17 +563,29 @@ well-formed read queries covered by the current TCK.
 
 ### Phase 7 — Read-Fallback Bucket Drain  (🚧 in progress)
 
-**Goal:** drive read-query legacy fallbacks from ~951 to 0 by porting each
-construct from the legacy translator into `src/lqa/sparql.rs`, one bucket
-at a time.
+**Goal:** port the *permanent* read-query constructs from the legacy translator
+into `src/lqa/sparql.rs` and start Phase L2 in parallel. Constructs whose
+correct implementation requires runtime list materialization (L2 domain)
+are explicitly **deferred** — they remain as legacy fallbacks until Phase L2
+lands, rather than being ported with lossy semantics that L2 will later discard.
+
+**Revised scope (2026-05-05):** The original goal of "drive fallbacks to 0" was
+predicated on porting all constructs regardless of semantics. After analysis,
+porting `collect()` → GROUP_CONCAT, UNWIND of runtime lists, and
+ListComprehension/PatternComprehension is **net-negative**: the lossy ported
+form ships as permanent API behaviour, difftest must assert wrong outputs to
+catch regressions, and Phase L2 then overwrites the same arm anyway. The
+better path is to port only constructs whose LQA lowering is **final** (no L2
+will change it), and build L2 for the rest.
 
 **The fundamental rule:** if the legacy translator handles it and TCK passes,
 it is portable to LQA. There are three categories:
 
 | Category | What to do |
 |---|---|
-| Legacy emits SPARQL → TCK passes → result is a coherent (even if limited) value | **Port it.** Add a `// LOSSY-SEMANTICS(spec-ref, reason)` comment if the output deviates from the spec. |
-| Legacy emits SPARQL → TCK passes → result is silently wrong in a way callers cannot detect (e.g. an expression that discards data with no observable error) | **Port it, but the difftest TOML MUST assert the actual lossy output, and the construct MUST be added to the Phase 6b `Unsupported` catalog as a documented limitation.** Do not silently propagate the bug. |
+| Legacy emits SPARQL → TCK passes → lowering is **final** (L2 will not change it) | **Port it.** Add a `// LOSSY-SEMANTICS(spec-ref, reason)` comment if output deviates from the spec. |
+| Legacy emits SPARQL → TCK passes → lowering is **lossy and L2-replaceable** (runtime list materialization, path decomposition, entity hydration) | **Defer to Phase L2.** Leave the legacy fallback. Do not port a lossy form that L2 must later overwrite. |
+| Legacy emits SPARQL → TCK passes → result is silently wrong in a way callers cannot detect | **Port it, but** difftest TOML MUST assert the actual (wrong) output, and the construct MUST appear in the Phase 6b limitations catalog. |
 | Construct is in `fundamental-limitations.md` AND in the 71 *failing* TCK scenarios | `Unsupported` is correct. |
 
 Everything else is a missing match arm. The legacy translator is the reference
@@ -610,11 +622,13 @@ Every ported construct whose output deviates from openCypher semantics must:
    know what to expect.
 
 **Concretely:**
-- `collect()` → legacy emits `GROUP_CONCAT` → LQA should emit `GROUP_CONCAT`. Not blocked.
-- `Expr::List` → legacy serializes `[1,2,3]` as a string literal → LQA does the same. Not blocked.
-- `ListComprehension` → legacy emits a SPARQL sub-SELECT → LQA does the same. Not blocked.
-- `PatternComprehension` → same. Not blocked.
-- `named_path` → legacy emits a BGP-chain and tracks the binding → LQA does the same. Not blocked.
+- `Expr::List` literal `[1,2,3]` in RETURN/WHERE → legacy serializes to string → LQA does the same. ✅ **Port it** (permanent; L2 does not change literal list handling in SPARQL).
+- `named_path` → legacy emits a BGP-chain → LQA does the same. ✅ **Port it** (permanent).
+- `range()` with non-literal args → legacy emits inline VALUES or sub-SELECT → LQA does the same. ✅ **Port it** (permanent).
+- `relvar_after_with` → port legacy treatment. ✅ **Port it** (permanent; no L2 alternative).
+- `collect()` → legacy emits `GROUP_CONCAT` → **defer to L2**. L2 will return a typed list; porting GROUP_CONCAT now means L2 must overwrite the same arm later.
+- `UNWIND items AS x` where `items` is a runtime variable → **defer to L2**. Correct implementation requires a Continuation: run phase 1, get the list, generate VALUES for phase 2.
+- `ListComprehension` / `PatternComprehension` → **defer to L2**. These require runtime iteration over a materialized list.
 - `Quantifier over non-constant list` (24) → these are in the **71 failing** TCK scenarios → leave as `Unsupported`.
 - Truly unbounded varlen path decomposition (`relationships(p)` on `[r*]`) → also in failing set → `Unsupported`.
 
@@ -638,13 +652,13 @@ Difftest:         220/220
 | 1h | List `IN` with null elements | — | 16 | guard in `CmpOp::In, Expr::List` special case | ❌ null-propagation; falls back |
 | 1i | List concatenation with dynamic operands | — | 8 | guard in `Expr::Add` list handler | ⚠️ partially portable; constant case handled |
 | 1j | List ordering comparison | — | 4 | guard in `Comparison(Lt/Le/Gt/Ge)` handler | ❌ list ordering semantics; falls back |
-| 3 | UNWIND of non-literal / variable list | 116 | 91 | `clauses.rs` UNWIND lowering | ✅ portable (needs bucket 1+2 first); −7 from UNWIND keys(n/r); additional reduction after bucket 1+2 |
+| 3 | UNWIND of non-literal / variable list | 116 | 91 | `clauses.rs` UNWIND lowering | ⏳ **DEFERRED to Phase L2** — correct implementation requires Continuation (runtime list → VALUES); porting GROUP_CONCAT string would be overwritten by L2 |
 | 4 | Temporal constructors (datetime/localdatetime/date/time/localtime/duration) | 199 | 14 | `temporal.rs` | ✅ DONE (−185) |
 | 5 | Named path `MATCH p = …` | 87 | 87 | `patterns.rs` — emits BGP chain, records path variable | ✅ portable |
-| 6 | `collect()` aggregate | 57 | 57 | `return_proj.rs` — emits `GROUP_CONCAT` | ✅ portable (GROUP_CONCAT, same lossy semantics as legacy) |
+| 6 | `collect()` aggregate | 57 | 57 | `return_proj.rs` — emits `GROUP_CONCAT` | ⏳ **DEFERRED to Phase L2** — L2 will return a typed list; porting GROUP_CONCAT now means L2 overwrites the same arm |
 | 7 | `range(start, end[, step])` | 53 | 26 | `mod.rs` function dispatch | ✅ DONE for literal args (−27); 26 non-literal remain |
 | 8 | `relvar_after_with` / varlen named relvar / unbounded varlen unlabeled | 41 | 41 | `is_lqa_safe` guards | ✅ portable for relvar_after_with (port leg. treatment); `unbounded_varlen_unlabeled` (9) in failing set → keep guard |
-| 9 | `ListComprehension` / `PatternComprehension` / `ListSlice` | 40 | 62 | `mod.rs` lower_expr branches | ✅ portable (correlated sub-SELECT, same as legacy) — increased because some previously hit bucket 1 first |
+| 9 | `ListComprehension` / `PatternComprehension` / `ListSlice` | 40 | 62 | `mod.rs` lower_expr branches | ⏳ **DEFERRED to Phase L2** — requires runtime list iteration; correlated sub-SELECT hack would be overwritten by L2 |
 | 10 | `Quantifier over non-constant list` | 24 | 48 | — | ❌ genuinely not portable: these 24 map to failing TCK scenarios; leave `Unsupported` — increased for same reason |
 | 11 | `keys()` / `properties()` / `labels()` | 20 | 22 | `mod.rs` function dispatch | ✅ UNWIND keys(n/r) + IN keys(n) DONE (−1 expr fallback); Map3 list returns blocked |
 | 12 | scalar-var property access, `Exists`, `type(r)`, `rand()`, `^`, `Subscript`, `with_orderby_shadow_alias`, misc | 42 | 57 | various | mostly portable; check legacy per-item |
@@ -655,30 +669,34 @@ Difftest:         220/220
 |------|--------|---|-------|
 | 2026-05-05 | 4 — temporal constructors | −185 | 6 difftest queries added |
 | 2026-05-05 | 7 — range() literal args | −27 | 3 difftest queries added |
-| 2026-05-11 | 3 — UNWIND keys(n/r) | −7 | UNWIND keys() node + rel RDF-star; 4 difftest queries added |
-| 2026-05-11 | 11 — keys() IN expression | −1 | 'literal' IN keys(node_var) → EXISTS { ?n <base:prop> ?_kv } |
-| 2026-05-11 | 1+2 — Expr::List + Expr::Map | −59 net | String serialisation ported; null/ordering/dynamic-concat guards added; 4 difftest queries added (224 total) |
+| 2026-05-05 | 3 — UNWIND keys(n/r) | −7 | UNWIND keys() node + rel RDF-star; 4 difftest queries added |
+| 2026-05-05 | 11 — keys() IN expression | −1 | 'literal' IN keys(node_var) → EXISTS { ?n <base:prop> ?_kv } |
+| 2026-05-05 | 1+2 — Expr::List + Expr::Map | −59 net | String serialisation ported; null/ordering/dynamic-concat guards added; 4 difftest queries added (224 total) |
 
 **Ordered queue (next-up first):**
 
-1. ~~**Buckets 1+2 — `Expr::List` and `Expr::Map`** (272). DONE — −59 net (constant-fold + null guards).~~
-2. **Bucket 3 — UNWIND non-literal** (91). Partially unblocked by 1+2.
-3. **Bucket 6 — `collect()`** (57). Emit `GROUP_CONCAT` from `AggKind::Collect`,
-   exactly as [src/translator/cypher/return_proj.rs](../src/translator/cypher/return_proj.rs) does.
-4. **Bucket 9 — `ListComprehension` / `PatternComprehension` / `ListSlice`** (62).
-   Read the legacy sub-SELECT shape from `mod.rs`, replicate in `lower_expr`.
-5. **Bucket 5 — named path** (87). Read [src/translator/cypher/patterns.rs](../src/translator/cypher/patterns.rs)
+Permanent constructs only — L2-deferred buckets (3, 6, 9) are NOT in this queue:
+
+1. ~~**Buckets 1+2 — `Expr::List` and `Expr::Map`** (272). DONE — −59 net.~~
+2. **Bucket 5 — named path** (87). Read [src/translator/cypher/patterns.rs](../src/translator/cypher/patterns.rs)
    path tracking. Remove the `named_path` guard in `lqa_safe_reason` and
    teach `lower_op(Scan/Expand)` to record the path variable binding.
-6. **Bucket 11 — `keys()`, `properties()`, `labels()`** (22). Port from
-   `mod.rs` function dispatch.
-7. **Bucket 8 — `relvar_after_with`** (19). Port legacy's treatment of
+3. **Bucket 8 — `relvar_after_with`** (19 of 41). Port legacy's treatment of
    relationship variables that cross a WITH boundary. The `varlen_named_relvar` (12)
    and `unbounded_varlen_unlabeled` (9) sub-buckets map to failing scenarios — keep those guards.
-8. **Bucket 7 remainder — `range()` with non-literal args** (26). See how legacy handles it.
-9. **Bucket 12 — long tail** (57). Port individually; check legacy per-item.
-10. **Bucket 10 — `Quantifier` over non-constant list** (48). Mostly in the failing set;
-    confirm each is in the 71 failures. Keep `Unsupported`.
+4. **Bucket 7 remainder — `range()` with non-literal args** (26). Port whatever
+   the legacy translator emits; this is a pure arithmetic lowering, not list-dependent.
+5. **Bucket 11 — `keys()`, `properties()`, `labels()`** (22). Port from
+   `mod.rs` function dispatch (only the forms not involving runtime list materialization).
+6. **Bucket 12 — long tail** (57). Port individually; check each item against the
+   L2 classification before porting — skip any that require runtime list access.
+7. **Bucket 10 — `Quantifier` over non-constant list** (48). In the failing set;
+    keep `Unsupported`.
+
+**Deferred (start Phase L2 in parallel):**
+- Bucket 3 — UNWIND non-literal (91): requires `Continuation` runtime
+- Bucket 6 — `collect()` (57): requires typed list return
+- Bucket 9 — `ListComprehension` / `PatternComprehension` (62): requires runtime iteration
 
 **Correctness model — read this before touching any code:**
 
@@ -754,7 +772,9 @@ A construct that (a) is listed in `fundamental-limitations.md` as L2/L3
 **and** (b) maps to a scenario in the **71 failing** TCK scenarios.
 If it's in a *passing* scenario, it's portable.
 
-**Exit:** read fallbacks ≤ 25 (bucket 10 Quantifier only); TCK ≥ 3757; difftest ≥ 213.
+**Exit:** permanent-construct fallbacks ≤ 30 (bucket 10 Quantifier + L2-deferred buckets 3/6/9 remain
+as legacy fallbacks until Phase L2); TCK ≥ 3757; difftest ≥ 213; Phase L2
+work started in parallel (see [l2-runtime-support.md](l2-runtime-support.md)).
 
 ### Phase 8 — Write-Clause LQA + Legacy Translator Deletion  (planned)
 
