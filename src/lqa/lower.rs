@@ -415,11 +415,14 @@ impl AstLowerer {
     // ── WITH ─────────────────────────────────────────────────────────────────
 
     fn lower_with(&mut self, inner: Op, w: &ast::WithClause) -> Result<Op, PolygraphError> {
-        let (proj_items, agg_items) = self.lower_return_items(&w.items)?;
+        let (proj_items, agg_items, post_group_aliases) = self.lower_return_items(&w.items)?;
+
+        // Keep a copy for ORDER BY aggregate-to-alias rewriting.
+        let agg_items_for_order = agg_items.clone();
 
         let projected = if !agg_items.is_empty() {
             let agg_aliases: Vec<String> = agg_items.iter().map(|a| a.alias.clone()).collect();
-            let group_keys = proj_cols_keys(&proj_items, &agg_aliases);
+            let group_keys = proj_cols_keys(&proj_items, &agg_aliases, &post_group_aliases);
             let grouped = Op::GroupBy {
                 inner: Box::new(inner),
                 group_keys,
@@ -449,7 +452,7 @@ impl AstLowerer {
             projected
         };
 
-        let ordered = self.maybe_order_by(filtered, w.order_by.as_ref())?;
+        let ordered = self.maybe_order_by_with_aggs(filtered, w.order_by.as_ref(), &agg_items_for_order)?;
         let skipped = self.maybe_skip(ordered, w.skip.as_ref())?;
         self.maybe_limit(skipped, w.limit.as_ref())
     }
@@ -457,11 +460,14 @@ impl AstLowerer {
     // ── RETURN ───────────────────────────────────────────────────────────────
 
     fn lower_return(&mut self, inner: Op, r: &ast::ReturnClause) -> Result<Op, PolygraphError> {
-        let (proj_items, agg_items) = self.lower_return_items(&r.items)?;
+        let (proj_items, agg_items, post_group_aliases) = self.lower_return_items(&r.items)?;
+
+        // Keep a copy for ORDER BY aggregate-to-alias rewriting (see below).
+        let agg_items_for_order = agg_items.clone();
 
         let projected = if !agg_items.is_empty() {
             let agg_aliases: Vec<String> = agg_items.iter().map(|a| a.alias.clone()).collect();
-            let group_keys = proj_cols_keys(&proj_items, &agg_aliases);
+            let group_keys = proj_cols_keys(&proj_items, &agg_aliases, &post_group_aliases);
             let grouped = Op::GroupBy {
                 inner: Box::new(inner),
                 group_keys,
@@ -480,7 +486,9 @@ impl AstLowerer {
             }
         };
 
-        let ordered = self.maybe_order_by(projected, r.order_by.as_ref())?;
+        // Use agg-aware ORDER BY so that `ORDER BY max(n.age)` resolves to
+        // the alias variable bound by the GROUP BY rather than a bare aggregate.
+        let ordered = self.maybe_order_by_with_aggs(projected, r.order_by.as_ref(), &agg_items_for_order)?;
         let skipped = self.maybe_skip(ordered, r.skip.as_ref())?;
         let limited = self.maybe_limit(skipped, r.limit.as_ref())?;
 
@@ -499,10 +507,13 @@ impl AstLowerer {
     fn lower_return_items(
         &mut self,
         items: &ast::ReturnItems,
-    ) -> Result<(Vec<ProjItem>, Vec<AggItem>), PolygraphError> {
+    ) -> Result<(Vec<ProjItem>, Vec<AggItem>, Vec<String>), PolygraphError> {
         let mut proj: Vec<ProjItem> = Vec::new();
         let mut aggs: Vec<AggItem> = Vec::new();
         let mut gen_counter = 0u32;
+        // Aliases of projection items that are computed POST-GROUP (not group keys):
+        // compound expressions that contained extracted aggregate sub-expressions.
+        let mut post_group_aliases: Vec<String> = Vec::new();
 
         match items {
             ast::ReturnItems::All => {
@@ -546,7 +557,7 @@ impl AstLowerer {
                         _ => None,
                     };
                     let expr = self.lower_expr(&item.expression)?;
-                    // Check if this expression is/wraps an aggregate.
+                    // Check if this expression is/wraps an aggregate (directly or nested).
                     if matches!(expr, Expr::Aggregate { .. }) {
                         // Emit as an aggregate: bind the agg expr to the alias.
                         aggs.push(AggItem {
@@ -559,6 +570,18 @@ impl AstLowerer {
                             alias: alias.clone(),
                             display_name: display_name.clone(),
                         });
+                    } else if expr_contains_aggregate(&expr) {
+                        // Compound expression containing aggregate(s): extract each
+                        // aggregate sub-expression, replacing it with a fresh variable.
+                        // E.g. `count(a) + 3` → agg[_agg_0=count(a)], proj[_agg_0 + 3].
+                        let extracted = extract_nested_aggregates(expr, &mut aggs, &mut gen_counter);
+                        // Mark this alias as a post-group computation (not a group key).
+                        post_group_aliases.push(alias.clone());
+                        proj.push(ProjItem {
+                            expr: extracted,
+                            alias,
+                            display_name,
+                        });
                     } else {
                         proj.push(ProjItem {
                             expr,
@@ -569,7 +592,7 @@ impl AstLowerer {
                 }
             }
         }
-        Ok((proj, aggs))
+        Ok((proj, aggs, post_group_aliases))
     }
 
     // ── ORDER BY / SKIP / LIMIT helpers ──────────────────────────────────────
@@ -579,13 +602,32 @@ impl AstLowerer {
         op: Op,
         order_by: Option<&ast::OrderByClause>,
     ) -> Result<Op, PolygraphError> {
+        self.maybe_order_by_with_aggs(op, order_by, &[])
+    }
+
+    /// Like `maybe_order_by`, but when ORDER BY expressions are aggregates that
+    /// already appear in `agg_items` (e.g. `ORDER BY max(n.age)` when the RETURN
+    /// clause also has `max(n.age)`), they are replaced by the corresponding alias
+    /// variable rather than re-emitting the aggregate — which would be invalid
+    /// in SPARQL since aggregates may only appear inside `GROUP BY` / aggregate
+    /// expressions.
+    fn maybe_order_by_with_aggs(
+        &mut self,
+        op: Op,
+        order_by: Option<&ast::OrderByClause>,
+        agg_items: &[AggItem],
+    ) -> Result<Op, PolygraphError> {
         let Some(ob) = order_by else { return Ok(op) };
         let keys = ob
             .items
             .iter()
             .map(|si| {
+                let lowered = self.lower_expr(&si.expression)?;
+                // Replace any aggregate sub-expression with its alias variable
+                // so the sort key references the GROUP BY output, not the aggregate.
+                let resolved = rewrite_aggs_to_vars(lowered, agg_items);
                 Ok(SortKey {
-                    expr: self.lower_expr(&si.expression)?,
+                    expr: resolved,
                     dir: if si.descending {
                         crate::lqa::expr::SortDir::Desc
                     } else {
@@ -1482,17 +1524,25 @@ fn lower_literal(l: &ast::Literal) -> Literal {
 ///
 /// Those proj-list entries must NOT become GROUP BY keys — the alias is the
 /// aggregate output, not an input column.
-fn proj_cols_keys(items: &[ProjItem], agg_aliases: &[String]) -> Vec<String> {
+fn proj_cols_keys(
+    items: &[ProjItem],
+    agg_aliases: &[String],
+    post_group_aliases: &[String],
+) -> Vec<String> {
     let agg_set: std::collections::HashSet<&str> = agg_aliases.iter().map(|s| s.as_str()).collect();
+    let post_set: std::collections::HashSet<&str> =
+        post_group_aliases.iter().map(|s| s.as_str()).collect();
     items
         .iter()
         .filter_map(|pi| {
-            // Every non-aggregate, non-wildcard projection item is a GROUP BY key.
-            // This includes both Variable references (already-bound vars) and
-            // Property-access expressions (e.g. `n.city AS city`) — the property
-            // triple for property-access keys is generated inside the Group inner
-            // by the SPARQL lowerer.
-            if pi.alias != "*" && !agg_set.contains(pi.alias.as_str()) {
+            // Every non-aggregate, non-wildcard projection item is a GROUP BY key,
+            // EXCEPT for compound expressions that contain extracted aggregates
+            // (tracked in post_group_aliases) — those are computed AFTER GROUP BY
+            // as Extend steps.
+            if pi.alias != "*"
+                && !agg_set.contains(pi.alias.as_str())
+                && !post_set.contains(pi.alias.as_str())
+            {
                 Some(pi.alias.clone())
             } else {
                 None
@@ -1531,6 +1581,118 @@ fn is_definitely_non_list(expr: &ast::Expression) -> bool {
             | E::Literal(Literal::String(_))
             | E::Map(_)
     )
+}
+
+/// Replace every `Expr::Aggregate` sub-expression that exactly matches an
+/// entry in `agg_items` with the corresponding alias variable.  This is used
+/// to rewrite ORDER BY sort-key expressions when the same aggregate already
+/// appears in the RETURN/WITH clause: in SPARQL the sort key must reference
+/// the Group-bound variable, not repeat the aggregate.
+///
+/// Compound expressions like `count(a) + 1` are also rewritten recursively.
+fn rewrite_aggs_to_vars(expr: Expr, agg_items: &[AggItem]) -> Expr {
+    // First check if the whole expression is a known aggregate → alias var.
+    if let Expr::Aggregate { .. } = &expr {
+        for ai in agg_items {
+            if ai.expr == expr {
+                return Expr::var(&ai.alias);
+            }
+        }
+        // Aggregate not found in the map — return as-is (will fail later).
+        return expr;
+    }
+    // Recursively rewrite compound expressions.
+    match expr {
+        Expr::Add(a, b) => Expr::Add(
+            Box::new(rewrite_aggs_to_vars(*a, agg_items)),
+            Box::new(rewrite_aggs_to_vars(*b, agg_items)),
+        ),
+        Expr::Sub(a, b) => Expr::Sub(
+            Box::new(rewrite_aggs_to_vars(*a, agg_items)),
+            Box::new(rewrite_aggs_to_vars(*b, agg_items)),
+        ),
+        Expr::Mul(a, b) => Expr::Mul(
+            Box::new(rewrite_aggs_to_vars(*a, agg_items)),
+            Box::new(rewrite_aggs_to_vars(*b, agg_items)),
+        ),
+        Expr::Div(a, b) => Expr::Div(
+            Box::new(rewrite_aggs_to_vars(*a, agg_items)),
+            Box::new(rewrite_aggs_to_vars(*b, agg_items)),
+        ),
+        Expr::Mod(a, b) => Expr::Mod(
+            Box::new(rewrite_aggs_to_vars(*a, agg_items)),
+            Box::new(rewrite_aggs_to_vars(*b, agg_items)),
+        ),
+        other => other,
+    }
+}
+
+/// Returns `true` if the LQA expression tree contains any `Expr::Aggregate` node.
+/// Used to detect compound aggregate expressions like `count(a) + 3`.
+fn expr_contains_aggregate(expr: &Expr) -> bool {
+    match expr {
+        Expr::Aggregate { .. } => true,
+        Expr::Add(a, b) | Expr::Sub(a, b) | Expr::Mul(a, b) | Expr::Div(a, b)
+        | Expr::Mod(a, b) | Expr::Pow(a, b) | Expr::And(a, b) | Expr::Or(a, b)
+        | Expr::Xor(a, b) | Expr::Comparison(_, a, b) => {
+            expr_contains_aggregate(a) || expr_contains_aggregate(b)
+        }
+        Expr::Unary(_, e) | Expr::Not(e) | Expr::IsNull(e) | Expr::IsNotNull(e)
+        | Expr::Property(e, _) => expr_contains_aggregate(e),
+        Expr::FunctionCall { args, .. } => args.iter().any(expr_contains_aggregate),
+        Expr::List(items) => items.iter().any(expr_contains_aggregate),
+        Expr::CaseSearched { branches, else_expr } => {
+            branches.iter().any(|(w, t)| expr_contains_aggregate(w) || expr_contains_aggregate(t))
+                || else_expr.as_ref().map_or(false, |e| expr_contains_aggregate(e))
+        }
+        _ => false,
+    }
+}
+
+/// Recursively replace every `Expr::Aggregate` sub-expression in `expr` with a
+/// fresh variable reference, pushing the extracted aggregate into `aggs`.
+/// Returns the transformed expression.
+fn extract_nested_aggregates(expr: Expr, aggs: &mut Vec<AggItem>, counter: &mut u32) -> Expr {
+    match expr {
+        Expr::Aggregate { .. } => {
+            let alias = format!("_agg_ex_{}", *counter);
+            *counter += 1;
+            aggs.push(AggItem { expr, alias: alias.clone() });
+            Expr::var(&alias)
+        }
+        Expr::Add(a, b) => Expr::Add(
+            Box::new(extract_nested_aggregates(*a, aggs, counter)),
+            Box::new(extract_nested_aggregates(*b, aggs, counter)),
+        ),
+        Expr::Sub(a, b) => Expr::Sub(
+            Box::new(extract_nested_aggregates(*a, aggs, counter)),
+            Box::new(extract_nested_aggregates(*b, aggs, counter)),
+        ),
+        Expr::Mul(a, b) => Expr::Mul(
+            Box::new(extract_nested_aggregates(*a, aggs, counter)),
+            Box::new(extract_nested_aggregates(*b, aggs, counter)),
+        ),
+        Expr::Div(a, b) => Expr::Div(
+            Box::new(extract_nested_aggregates(*a, aggs, counter)),
+            Box::new(extract_nested_aggregates(*b, aggs, counter)),
+        ),
+        Expr::Mod(a, b) => Expr::Mod(
+            Box::new(extract_nested_aggregates(*a, aggs, counter)),
+            Box::new(extract_nested_aggregates(*b, aggs, counter)),
+        ),
+        Expr::Pow(a, b) => Expr::Pow(
+            Box::new(extract_nested_aggregates(*a, aggs, counter)),
+            Box::new(extract_nested_aggregates(*b, aggs, counter)),
+        ),
+        Expr::Unary(op, e) => Expr::Unary(op, Box::new(extract_nested_aggregates(*e, aggs, counter))),
+        Expr::Not(e) => Expr::Not(Box::new(extract_nested_aggregates(*e, aggs, counter))),
+        Expr::FunctionCall { name, distinct, args } => Expr::FunctionCall {
+            name,
+            distinct,
+            args: args.into_iter().map(|a| extract_nested_aggregates(a, aggs, counter)).collect(),
+        },
+        _ => expr,
+    }
 }
 
 /// Derive the "natural" implicit Cypher alias for a return expression.

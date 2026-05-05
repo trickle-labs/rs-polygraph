@@ -26,9 +26,10 @@
 fn cypher_expr_contains_null(expr: &Expression) -> bool {
     match expr {
         Expression::Literal(crate::ast::cypher::Literal::Null) => true,
-        Expression::Not(e) | Expression::Negate(e) | Expression::IsNull(e) | Expression::IsNotNull(e) => {
-            cypher_expr_contains_null(e)
-        }
+        Expression::Not(e)
+        | Expression::Negate(e)
+        | Expression::IsNull(e)
+        | Expression::IsNotNull(e) => cypher_expr_contains_null(e),
         Expression::Or(a, b)
         | Expression::And(a, b)
         | Expression::Xor(a, b)
@@ -905,7 +906,11 @@ pub(crate) fn is_date_only_lit_str(s: &str) -> bool {
 /// three independent components: (1) yearMonth, (2) day-only, (3) time-only.
 /// Each is applied with a COALESCE so that inapplicable components (e.g. months
 /// on a localtime, or hours on a date) are silently skipped.
-pub(crate) fn temporal_subtract_sparql(temporal: SparExpr, dur: SparExpr, is_date: bool) -> SparExpr {
+pub(crate) fn temporal_subtract_sparql(
+    temporal: SparExpr,
+    dur: SparExpr,
+    is_date: bool,
+) -> SparExpr {
     temporal_arith_sparql(temporal, dur, true, is_date)
 }
 
@@ -940,22 +945,16 @@ fn temporal_arith_sparql(
     //      `temporal - STRDT(CONCAT("-", REPLACE(…, "P$1")), ym)`
     //      because `temporal - "-PxYxM"^^ym` = `temporal + PxYxM` ✓ in Oxigraph.
     let dur_str_ym = SparExpr::FunctionCall(Function::Str, vec![dur.clone()]);
-    let ym_pat = SparExpr::Literal(SparLit::new_simple_literal(
-        "^P(([0-9.]*Y)?([0-9.]*M)?).*",
-    ));
+    let ym_pat = SparExpr::Literal(SparLit::new_simple_literal("^P(([0-9.]*Y)?([0-9.]*M)?).*"));
     let ym_repl = SparExpr::Literal(SparLit::new_simple_literal("P$1"));
     let ym_str = SparExpr::FunctionCall(Function::Replace, vec![dur_str_ym, ym_pat, ym_repl]);
     let ym_dur = if subtract {
         // SUBTRACT: date - STRDT(ym_str, ym)
-        SparExpr::FunctionCall(
-            Function::StrDt,
-            vec![ym_str, SparExpr::NamedNode(ymd_nn)],
-        )
+        SparExpr::FunctionCall(Function::StrDt, vec![ym_str, SparExpr::NamedNode(ymd_nn)])
     } else {
         // ADD: date - STRDT(CONCAT("-", ym_str), ym)  (ADD via subtracting negated ym)
         let neg_lit = SparExpr::Literal(SparLit::new_simple_literal("-"));
-        let neg_ym_str =
-            SparExpr::FunctionCall(Function::Concat, vec![neg_lit, ym_str]);
+        let neg_ym_str = SparExpr::FunctionCall(Function::Concat, vec![neg_lit, ym_str]);
         SparExpr::FunctionCall(
             Function::StrDt,
             vec![neg_ym_str, SparExpr::NamedNode(ymd_nn)],
@@ -980,16 +979,16 @@ fn temporal_arith_sparql(
     //   → "P-14D" → "P14D",  "P14D" → "-P14D"
     // Then always: step2 = COALESCE(step1 - STRDT(effective, dtd), step1)
     let dur_str_dt = SparExpr::FunctionCall(Function::Str, vec![dur.clone()]);
-    let dt_strip_pat =
-        SparExpr::Literal(SparLit::new_simple_literal("^P([0-9.]*Y)?([0-9.]*M)?"));
+    let dt_strip_pat = SparExpr::Literal(SparLit::new_simple_literal("^P([0-9.]*Y)?([0-9.]*M)?"));
     let dt_strip_repl = SparExpr::Literal(SparLit::new_simple_literal("P"));
-    let dt_full =
-        SparExpr::FunctionCall(Function::Replace, vec![dur_str_dt, dt_strip_pat, dt_strip_repl]);
+    let dt_full = SparExpr::FunctionCall(
+        Function::Replace,
+        vec![dur_str_dt, dt_strip_pat, dt_strip_repl],
+    );
 
     let t_lit_1 = SparExpr::Literal(SparLit::new_simple_literal("T"));
     let t_lit_2 = SparExpr::Literal(SparLit::new_simple_literal("T"));
-    let day_raw =
-        SparExpr::FunctionCall(Function::StrBefore, vec![dt_full.clone(), t_lit_1]);
+    let day_raw = SparExpr::FunctionCall(Function::StrBefore, vec![dt_full.clone(), t_lit_1]);
 
     let p_dash = SparExpr::Literal(SparLit::new_simple_literal("P-"));
     let dash_p = SparExpr::Literal(SparLit::new_simple_literal("-P"));
@@ -1014,7 +1013,10 @@ fn temporal_arith_sparql(
         SparExpr::If(
             Box::new(is_neg),
             Box::new(SparExpr::FunctionCall(Function::Concat, vec![p_bare, tail])),
-            Box::new(SparExpr::FunctionCall(Function::Concat, vec![dash_lit, day_raw.clone()])),
+            Box::new(SparExpr::FunctionCall(
+                Function::Concat,
+                vec![dash_lit, day_raw.clone()],
+            )),
         )
     };
 
@@ -1045,16 +1047,13 @@ fn temporal_arith_sparql(
         //   s = IF(CONTAINS(after_m, "S"), xsd:decimal(STRBEFORE(after_m, "S")), 0)
         //   total     = h * 3600 + m * 60 + s
         //   time_dur  = STRDT(CONCAT(IF(total>=0, pos_pref, neg_pref), STR(ABS(total)), "S"), dtd)
-        let xsd_decimal_nn =
-            NamedNode::new_unchecked("http://www.w3.org/2001/XMLSchema#decimal");
+        let xsd_decimal_nn = NamedNode::new_unchecked("http://www.w3.org/2001/XMLSchema#decimal");
         let dec_cast =
             |e: SparExpr| SparExpr::FunctionCall(Function::Custom(xsd_decimal_nn.clone()), vec![e]);
-        let dec_0 =
-            || SparExpr::Literal(SparLit::new_typed_literal("0", xsd_decimal_nn.clone()));
+        let dec_0 = || SparExpr::Literal(SparLit::new_typed_literal("0", xsd_decimal_nn.clone()));
 
         let dur_s = SparExpr::FunctionCall(Function::Str, vec![dur]);
-        let strip_pat =
-            SparExpr::Literal(SparLit::new_simple_literal("^P([0-9.]*Y)?([0-9.]*M)?"));
+        let strip_pat = SparExpr::Literal(SparLit::new_simple_literal("^P([0-9.]*Y)?([0-9.]*M)?"));
         let strip_repl = SparExpr::Literal(SparLit::new_simple_literal("P"));
         let stripped =
             SparExpr::FunctionCall(Function::Replace, vec![dur_s, strip_pat, strip_repl]);
@@ -1065,10 +1064,8 @@ fn temporal_arith_sparql(
         let s_str = SparExpr::Literal(SparLit::new_simple_literal("S"));
 
         // H value
-        let has_h = SparExpr::FunctionCall(
-            Function::Contains,
-            vec![time_raw.clone(), h_str.clone()],
-        );
+        let has_h =
+            SparExpr::FunctionCall(Function::Contains, vec![time_raw.clone(), h_str.clone()]);
         let h_val = SparExpr::If(
             Box::new(has_h.clone()),
             Box::new(dec_cast(SparExpr::FunctionCall(
@@ -1089,10 +1086,8 @@ fn temporal_arith_sparql(
         );
 
         // M value
-        let has_m = SparExpr::FunctionCall(
-            Function::Contains,
-            vec![after_h.clone(), m_str.clone()],
-        );
+        let has_m =
+            SparExpr::FunctionCall(Function::Contains, vec![after_h.clone(), m_str.clone()]);
         let m_val = SparExpr::If(
             Box::new(has_m.clone()),
             Box::new(dec_cast(SparExpr::FunctionCall(
@@ -1113,10 +1108,8 @@ fn temporal_arith_sparql(
         );
 
         // S value
-        let has_s = SparExpr::FunctionCall(
-            Function::Contains,
-            vec![after_m.clone(), s_str.clone()],
-        );
+        let has_s =
+            SparExpr::FunctionCall(Function::Contains, vec![after_m.clone(), s_str.clone()]);
         let s_val = SparExpr::If(
             Box::new(has_s),
             Box::new(dec_cast(SparExpr::FunctionCall(
@@ -1127,10 +1120,8 @@ fn temporal_arith_sparql(
         );
 
         // total = h * 3600 + m * 60 + s
-        let c3600 =
-            SparExpr::Literal(SparLit::new_typed_literal("3600", xsd_decimal_nn.clone()));
-        let c60 =
-            SparExpr::Literal(SparLit::new_typed_literal("60", xsd_decimal_nn.clone()));
+        let c3600 = SparExpr::Literal(SparLit::new_typed_literal("3600", xsd_decimal_nn.clone()));
+        let c60 = SparExpr::Literal(SparLit::new_typed_literal("60", xsd_decimal_nn.clone()));
         let total = SparExpr::Add(
             Box::new(SparExpr::Add(
                 Box::new(SparExpr::Multiply(Box::new(h_val), Box::new(c3600))),
@@ -1146,8 +1137,7 @@ fn temporal_arith_sparql(
         let pos_pref_lit = SparExpr::Literal(SparLit::new_simple_literal(pos_pref));
         let neg_pref_lit = SparExpr::Literal(SparLit::new_simple_literal(neg_pref));
         let s_suffix = SparExpr::Literal(SparLit::new_simple_literal("S"));
-        let dec_zero =
-            SparExpr::Literal(SparLit::new_typed_literal("0", xsd_decimal_nn.clone()));
+        let dec_zero = SparExpr::Literal(SparLit::new_typed_literal("0", xsd_decimal_nn.clone()));
 
         // CONCAT(IF(total >= 0, pos_pref, neg_pref), STR(ABS(total)), "S")
         let time_str_norm = SparExpr::FunctionCall(
@@ -1180,4 +1170,3 @@ fn temporal_arith_sparql(
         )
     }
 }
-
