@@ -153,9 +153,16 @@ fn try_lqa_path(
 ) -> Result<Option<TranspileOutput>, PolygraphError> {
     translator::cypher::check_semantics(ast)?;
 
-    if !is_lqa_safe(ast) {
+    // Check for definite semantic errors (duplicate aliases) that should be
+    // raised as Translation errors, not silently swallowed by legacy.
+    if let Some(reason) = lqa_safe_reason(ast) {
+        if reason == "duplicate_alias" {
+            return Err(PolygraphError::Translation {
+                message: "Duplicate column name in RETURN/WITH: ColumnNameConflict".into(),
+            });
+        }
         if std::env::var("POLYGRAPH_TRACE_LEGACY").is_ok() {
-            eprintln!("[LEGACY] is_lqa_safe=false");
+            eprintln!("[LEGACY] is_lqa_safe=false reason={reason}");
         }
         return Ok(None);
     }
@@ -249,7 +256,9 @@ fn is_lqa_safe(ast: &ast::CypherQuery) -> bool {
     }
 }
 
-/// Returns `None` if safe for LQA, or `Some(reason)` describing the blocking construct.
+/// Returns `None` if safe for LQA, or `Some(("reason", is_error))` where
+/// `is_error=true` indicates a definite semantic error that should propagate
+/// as a `PolygraphError::Translation` (not legacy fallback).
 fn lqa_safe_reason(ast: &ast::CypherQuery) -> Option<&'static str> {
     use ast::cypher::{Clause, Expression, PatternElement, ReturnItems};
     use std::collections::HashSet;
