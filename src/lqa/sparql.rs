@@ -3081,6 +3081,47 @@ impl Compiler {
                 }
             }
 
+            Expr::Exists(inner_op) => {
+                // Do not handle variable-length path predicates in LQA — the VL path
+                // semantics inside EXISTS (pattern predicates like `WHERE (n)-[:REL*2]-()`)
+                // only work correctly via the legacy translator.
+                if op_has_varlen(inner_op) {
+                    return Err(PolygraphError::Unsupported {
+                        construct: "expression type Exists in LQA SPARQL lowering".into(),
+                        spec_ref: "openCypher 9 §6.3.4".into(),
+                        reason: "EXISTS with variable-length path requires legacy path".into(),
+                    });
+                }
+                // Evaluate an EXISTS { ... } subquery.  We need to isolate the inner
+                // pending state so variable bindings and optional triples do not leak
+                // into the outer WHERE clause.
+                let saved_scan_vars = self.scan_vars.clone();
+                let saved_nullable = self.nullable.clone();
+                let saved_edge_vars = self.edge_vars.clone();
+                let saved_anon_edge_info = std::mem::take(&mut self.anon_edge_info);
+                let saved_pending_triples = std::mem::take(&mut self.pending_triples);
+                let saved_opt_triples = std::mem::take(&mut self.pending_optional_triples);
+                let saved_opt_groups = std::mem::take(&mut self.pending_optional_groups);
+                let saved_opt_patterns = std::mem::take(&mut self.pending_optional_patterns);
+                let saved_binds = std::mem::take(&mut self.pending_binds);
+
+                let inner_gp = self.lower_op(inner_op)?;
+                let exists_pat = self.flush_pending(inner_gp);
+
+                // Restore outer scope
+                self.scan_vars = saved_scan_vars;
+                self.nullable = saved_nullable;
+                self.edge_vars = saved_edge_vars;
+                self.anon_edge_info = saved_anon_edge_info;
+                self.pending_triples = saved_pending_triples;
+                self.pending_optional_triples = saved_opt_triples;
+                self.pending_optional_groups = saved_opt_groups;
+                self.pending_optional_patterns = saved_opt_patterns;
+                self.pending_binds = saved_binds;
+
+                Ok(SparExpr::Exists(Box::new(exists_pat)))
+            }
+
             Expr::List(_)
             | Expr::Map(_)
             | Expr::Subscript(_, _)
@@ -3088,7 +3129,6 @@ impl Compiler {
             | Expr::ListComprehension { .. }
             | Expr::PatternComprehension { .. }
             | Expr::Reduce { .. }
-            | Expr::Exists(_)
             | Expr::Aggregate { .. } => Err(PolygraphError::Unsupported {
                 construct: format!(
                     "expression type {} in LQA SPARQL lowering",
@@ -3215,7 +3255,19 @@ impl Compiler {
                 reason: "no direct SPARQL built-in; legacy path applies".into(),
             }),
             "strlen" | "size" => {
-                let a = self.lower_expr(args.first().ok_or_else(|| arg_err(name))?)?;
+                let arg = args.first().ok_or_else(|| arg_err(name))?;
+                // Special case: if the arg is a compile-time constant list,
+                // return the list length directly as an integer literal.
+                match arg {
+                    Expr::List(items) => {
+                        return Ok(Self::lit_integer(items.len() as i64));
+                    }
+                    Expr::Map(pairs) => {
+                        return Ok(Self::lit_integer(pairs.len() as i64));
+                    }
+                    _ => {}
+                }
+                let a = self.lower_expr(arg)?;
                 Ok(SparExpr::FunctionCall(Function::StrLen, vec![a]))
             }
             "length" => {
@@ -3804,6 +3856,36 @@ fn literal_to_ground(expr: &Expr) -> Result<Option<spargebra::term::GroundTerm>,
             spec_ref: "openCypher 9 §4.5".into(),
             reason: "UNWIND/VALUES only supports scalar literal values in LQA path; nested lists and computed expressions require legacy path".into(),
         }),
+    }
+}
+
+/// Returns `true` if `op` or any of its sub-ops is an `Expand` with a
+/// variable-length path (`range: Some(_)`).  Used to guard the EXISTS handler:
+/// VL-path predicates like `WHERE (n)-[:REL*2]-()` need the legacy path.
+fn op_has_varlen(op: &Op) -> bool {
+    match op {
+        Op::Expand { inner, range, .. } => range.is_some() || op_has_varlen(inner),
+        Op::Scan { .. } | Op::Unit | Op::Values { .. } => false,
+        Op::Selection { inner, .. }
+        | Op::Projection { inner, .. }
+        | Op::Unwind { inner, .. }
+        | Op::Limit { inner, .. }
+        | Op::OrderBy { inner, .. }
+        | Op::Skip { inner, .. }
+        | Op::GroupBy { inner, .. }
+        | Op::Distinct { inner }
+        | Op::Create { inner, .. }
+        | Op::Set { inner, .. }
+        | Op::Remove { inner, .. }
+        | Op::Delete { inner, .. }
+        | Op::Merge { inner, .. }
+        | Op::Subquery { inner, .. }
+        | Op::Foreach { inner, .. }
+        | Op::Call { inner, .. } => op_has_varlen(inner),
+        Op::LeftOuterJoin { left, right, .. }
+        | Op::CartesianProduct { left, right }
+        | Op::Union { left, right }
+        | Op::UnionAll { left, right } => op_has_varlen(left) || op_has_varlen(right),
     }
 }
 
