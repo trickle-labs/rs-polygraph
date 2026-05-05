@@ -3446,6 +3446,35 @@ impl Compiler {
                     }),
                 }
             }
+            "rand" => Err(PolygraphError::Unsupported {
+                construct: "rand()".into(),
+                spec_ref: "openCypher 9 §6.3.2".into(),
+                reason: "rand() inside aggregates raises SyntaxError; legacy fallback needed".into(),
+            }),
+            "sqrt" => {
+                // SPARQL 1.1 has no native SQRT; fall back.
+                // TODO: use xpf:sqrt or custom function when supported.
+                Err(PolygraphError::Unsupported {
+                    construct: format!("{name}()"),
+                    spec_ref: "openCypher 9 §6.3.2".into(),
+                    reason: "sqrt() has no SPARQL 1.1 built-in; legacy fallback applies".into(),
+                })
+            }
+            "reverse" => {
+                // Constant folding: reverse over a compile-time constant string.
+                let arg = args.first().ok_or_else(|| arg_err(name))?;
+                match arg {
+                    Expr::Literal(Literal::String(s)) => {
+                        let reversed: String = s.chars().rev().collect();
+                        Ok(SparExpr::Literal(SparLit::new_simple_literal(reversed)))
+                    }
+                    _ => Err(PolygraphError::Unsupported {
+                        construct: "reverse()".into(),
+                        spec_ref: "openCypher 9 §6.3.2".into(),
+                        reason: "reverse() on non-constant string requires legacy path".into(),
+                    }),
+                }
+            }
             _ => Err(PolygraphError::Unsupported {
                 construct: format!("{name}()"),
                 spec_ref: "openCypher 9 §6.3".into(),
