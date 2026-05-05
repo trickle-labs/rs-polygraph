@@ -1,0 +1,16 @@
+name = "map_literal_return"
+description = "Return a constant map literal as a serialised string."
+spec_ref = "openCypher 9 §2.1.14 Map literals"
+
+cypher = """
+RETURN {name: 'Alice', age: 30} AS m
+"""
+
+[fixture]
+nodes = []
+edges = []
+
+[expected]
+columns = ["m"]
+rows = [["{name: 'Alice', age: 30}"]]
+order = "bag"

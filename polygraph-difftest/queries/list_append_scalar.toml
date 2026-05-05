@@ -1,0 +1,16 @@
+name = "list_append_scalar"
+description = "Appending a scalar to a list with + produces a new list."
+spec_ref = "openCypher 9 §6.5 List operations — + append"
+
+cypher = """
+RETURN [1, 2] + 3 AS result
+"""
+
+[fixture]
+nodes = []
+edges = []
+
+[expected]
+columns = ["result"]
+rows = [["[1, 2, 3]"]]
+order = "bag"

@@ -1,0 +1,16 @@
+name = "list_size_concat"
+description = "size() of a concatenated list returns element count, not string length."
+spec_ref = "openCypher 9 §8.3.14 List functions — size(list)"
+
+cypher = """
+RETURN size([1, 2] + [3, 4, 5]) AS n
+"""
+
+[fixture]
+nodes = []
+edges = []
+
+[expected]
+columns = ["n"]
+rows = [[5]]
+order = "bag"

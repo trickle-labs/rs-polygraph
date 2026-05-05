@@ -1,0 +1,16 @@
+name = "list_concat_literal"
+description = "Constant list concatenation via + is folded to a single serialised list."
+spec_ref = "openCypher 9 §6.5 List operations — + concatenation"
+
+cypher = """
+RETURN [1, 2] + [3, 4] AS result
+"""
+
+[fixture]
+nodes = []
+edges = []
+
+[expected]
+columns = ["result"]
+rows = [["[1, 2, 3, 4]"]]
+order = "bag"

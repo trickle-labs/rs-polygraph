@@ -2903,6 +2903,32 @@ impl Compiler {
                 // list concatenation when both operands are list-typed.
                 // SPARQL `+` is arithmetic-only; strings must use CONCAT().
 
+                // List concatenation: [a, b] + [c] → [a, b, c], [a] + scalar → [a, scalar].
+                // Merge element vectors and try to constant-fold.  Fall back to legacy
+                // for dynamic operands (runtime list values cannot be folded here).
+                let a_is_list = matches!(a.as_ref(), Expr::List(_));
+                let b_is_list = matches!(b.as_ref(), Expr::List(_));
+                if a_is_list || b_is_list {
+                    let mut combined: Vec<Expr> = match a.as_ref() {
+                        Expr::List(items) => items.clone(),
+                        other => vec![other.clone()],
+                    };
+                    match b.as_ref() {
+                        Expr::List(items) => combined.extend(items.iter().cloned()),
+                        other => combined.push(other.clone()),
+                    }
+                    let merged = Expr::List(combined);
+                    if let Some(s) = lqa_serialize_literal(&merged) {
+                        return Ok(Self::lit_str(&s));
+                    }
+                    // Dynamic operands — fall back to legacy for correct semantics.
+                    return Err(PolygraphError::Unsupported {
+                        construct: "list concatenation with dynamic operands in LQA SPARQL lowering".into(),
+                        spec_ref: "openCypher 9 §6.5".into(),
+                        reason: "list + operator with non-constant operands not yet handled; legacy fallback applies".into(),
+                    });
+                }
+
                 // Temporal arithmetic: date/time + duration needs special SPARQL.
                 if let Expr::Variable { name, .. } = a.as_ref() {
                     if let Some(xsd_type) = self.temporal_type_vars.get(name.as_str()).cloned() {
@@ -3063,10 +3089,44 @@ impl Compiler {
             Expr::Unary(UnaryOp::Pos, e) => self.lower_expr(e),
 
             Expr::Comparison(op, a, b) => {
+                // Guard: list ordering via string comparison gives semantically wrong results
+                // (Cypher list ordering is element-wise and typed, not lexicographic on the
+                // serialised string).  Return Err so legacy handles these cases.
+                if matches!(op, CmpOp::Lt | CmpOp::Le | CmpOp::Gt | CmpOp::Ge)
+                    && (matches!(a.as_ref(), Expr::List(_))
+                        || matches!(b.as_ref(), Expr::List(_)))
+                {
+                    return Err(PolygraphError::Unsupported {
+                        construct: "list ordering comparison in LQA SPARQL lowering".into(),
+                        spec_ref: "openCypher 9 §7.3".into(),
+                        reason: "list ordering not yet supported in LQA path; legacy fallback applies".into(),
+                    });
+                }
+                // Guard: list/map equality/inequality when null is present differs from plain
+                // string comparison (null propagates in Cypher, but comparing the serialised
+                // strings "[null, x]" always gives a definite false/true).  Return Err.
+                if matches!(op, CmpOp::Eq | CmpOp::Ne)
+                    && (lqa_expr_contains_null(a) || lqa_expr_contains_null(b))
+                {
+                    return Err(PolygraphError::Unsupported {
+                        construct: "list/map equality with null elements in LQA SPARQL lowering".into(),
+                        spec_ref: "openCypher 9 §7.3".into(),
+                        reason: "null propagation in list/map equality not yet handled; legacy fallback applies".into(),
+                    });
+                }
                 // Special case: `CmpOp::In` with a list literal RHS.
                 // Expand to SparExpr::In(lhs, [item1, item2, ...]) before lowering
                 // the RHS to avoid hitting the Unsupported path for Expr::List.
                 if let (CmpOp::In, Expr::List(items)) = (op, b.as_ref()) {
+                    // Guard: when the needle or any RHS list element contains null, Cypher's
+                    // three-valued IN semantics differ from SPARQL string equality.  Err → legacy.
+                    if lqa_expr_contains_null(a) || items.iter().any(lqa_expr_contains_null) {
+                        return Err(PolygraphError::Unsupported {
+                            construct: "list IN with null elements in LQA SPARQL lowering".into(),
+                            spec_ref: "openCypher 9 §6.3.2".into(),
+                            reason: "null propagation in list IN not yet handled; legacy fallback applies".into(),
+                        });
+                    }
                     let la = self.lower_expr(a)?;
                     let sparql_items = items
                         .iter()
@@ -3458,9 +3518,50 @@ impl Compiler {
                 Ok(SparExpr::Exists(Box::new(exists_pat)))
             }
 
-            Expr::List(_)
-            | Expr::Map(_)
-            | Expr::Subscript(_, _)
+            Expr::List(items) => {
+                // Fast path: all elements are compile-time constants.
+                if let Some(s) = lqa_serialize_literal(expr) {
+                    return Ok(Self::lit_str(&s));
+                }
+                // Empty list.
+                if items.is_empty() {
+                    return Ok(Self::lit_str("[]"));
+                }
+                // Dynamic: build CONCAT("[", piece0, ", ", piece1, …, "]")
+                let mut parts = vec![Self::lit_str("[")];
+                for (i, item) in items.iter().enumerate() {
+                    if i > 0 {
+                        parts.push(Self::lit_str(", "));
+                    }
+                    parts.push(self.lower_expr_as_concat_piece(item)?);
+                }
+                parts.push(Self::lit_str("]"));
+                Ok(SparExpr::FunctionCall(Function::Concat, parts))
+            }
+
+            Expr::Map(pairs) => {
+                // Fast path: all values are compile-time constants.
+                if let Some(s) = lqa_serialize_literal(expr) {
+                    return Ok(Self::lit_str(&s));
+                }
+                // Empty map.
+                if pairs.is_empty() {
+                    return Ok(Self::lit_str("{}"));
+                }
+                // Dynamic: build CONCAT("{", "key1: ", val1, ", ", "key2: ", val2, "}")
+                let mut parts = vec![Self::lit_str("{")];
+                for (i, (k, v)) in pairs.iter().enumerate() {
+                    if i > 0 {
+                        parts.push(Self::lit_str(", "));
+                    }
+                    parts.push(Self::lit_str(&format!("{k}: ")));
+                    parts.push(self.lower_expr_as_concat_piece(v)?);
+                }
+                parts.push(Self::lit_str("}"));
+                Ok(SparExpr::FunctionCall(Function::Concat, parts))
+            }
+
+            Expr::Subscript(_, _)
             | Expr::ListSlice { .. }
             | Expr::ListComprehension { .. }
             | Expr::PatternComprehension { .. }
@@ -3614,6 +3715,25 @@ impl Compiler {
                     }
                     Expr::Map(pairs) => {
                         return Ok(Self::lit_integer(pairs.len() as i64));
+                    }
+                    // size(list_a + list_b) where both are constant → element count.
+                    Expr::Add(box_a, box_b)
+                        if matches!(box_a.as_ref(), Expr::List(_))
+                            || matches!(box_b.as_ref(), Expr::List(_)) =>
+                    {
+                        let n_a: usize = match box_a.as_ref() {
+                            Expr::List(items) => items.len(),
+                            _ => 1,
+                        };
+                        let n_b: usize = match box_b.as_ref() {
+                            Expr::List(items) => items.len(),
+                            _ => 1,
+                        };
+                        if lqa_serialize_literal(box_a).is_some()
+                            && lqa_serialize_literal(box_b).is_some()
+                        {
+                            return Ok(Self::lit_integer((n_a + n_b) as i64));
+                        }
                     }
                     _ => {}
                 }
@@ -4842,6 +4962,19 @@ fn lqa_scalar_temporal_prop(val: &str, component: &str) -> Option<SparExpr> {
 /// Recursively serialize a fully-literal `Expr` to the Cypher string representation,
 /// e.g. `[1, 'foo', null]` → `"[1, 'foo', null]"` and `{a: 1}` → `"{a: 1}"`.
 /// Returns `None` if any sub-expression is not a compile-time literal.
+/// Returns `true` if `e` contains a `Literal::Null` anywhere inside a
+/// `Expr::List` or `Expr::Map` nesting.  Used to guard equality/IN lowering:
+/// when null is present, Cypher's three-valued semantics diverge from plain
+/// string comparison.
+fn lqa_expr_contains_null(e: &Expr) -> bool {
+    match e {
+        Expr::Literal(Literal::Null) => true,
+        Expr::List(items) => items.iter().any(lqa_expr_contains_null),
+        Expr::Map(pairs) => pairs.iter().any(|(_, v)| lqa_expr_contains_null(v)),
+        _ => false,
+    }
+}
+
 fn lqa_serialize_literal(e: &Expr) -> Option<String> {
     match e {
         Expr::List(items) => {
