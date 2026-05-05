@@ -376,17 +376,12 @@ fn lqa_safe_reason(ast: &ast::CypherQuery) -> Option<&'static str> {
         }
     }
 
-    // Route queries through LQA for any shape ending in "return", unless it is a
-    // bare-RETURN UNION shape (RETURN…UNION…RETURN) whose column semantics require
-    // the legacy path.  Previously this guard also excluded WITH-first and bare
-    // RETURN shapes; those are now handled by LQA after fixing integer division and
-    // boolean type-error detection.
+    // Route queries through LQA for any shape ending in "return".
+    // A bare-RETURN UNION (RETURN…UNION…RETURN) is also handled by LQA since
+    // lower_clauses() splits on UNION markers.
     {
         let last = clause_kinds.last().copied();
-        // Detect "RETURN … UNION … RETURN" (first clause is already "return").
-        let has_bare_return_union =
-            clause_kinds.first() == Some(&"return") && clause_kinds.contains(&"union");
-        if last != Some("return") || has_bare_return_union {
+        if last != Some("return") {
             return Some("clause_shape");
         }
     }
