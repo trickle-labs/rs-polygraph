@@ -1671,18 +1671,45 @@ pub(crate) fn temporal_datetime_from_map(pairs: &[(String, Expression)]) -> Opti
         let base_tz_s = if base_tz_raw.is_empty() {
             0
         } else {
-            parse_tz_offset_s(&normalize_tz(base_tz_raw)).unwrap_or(0)
+            // When base_tz_raw has a named timezone (e.g. "+01:00[Europe/Stockholm]"),
+            // compute the DST offset for the FINAL date (not the source date) so that
+            // "12:00 in Stockholm on March 28" correctly converts to UTC using the
+            // March offset (+02:00), not the source date's offset (+01:00).
+            let norm = normalize_tz(base_tz_raw);
+            let effective_tz = if let Some(brk) = norm.find('[') {
+                let tz_name = &norm[brk + 1..norm.len().saturating_sub(1)];
+                let dp: Vec<&str> = date_part.splitn(3, '-').collect();
+                let y: i64 = dp.get(0).and_then(|s| s.parse().ok()).unwrap_or(0);
+                let m: i64 = dp.get(1).and_then(|s| s.parse().ok()).unwrap_or(1);
+                let d: i64 = dp.get(2).and_then(|s| s.parse().ok()).unwrap_or(1);
+                tc_tz_suffix_ymd(tz_name, y, m, d)
+            } else {
+                norm
+            };
+            parse_tz_offset_s(&effective_tz).unwrap_or(0)
         };
         let new_tz_s = override_tz_str
             .as_deref()
             .and_then(parse_tz_offset_s)
             .unwrap_or(base_tz_s);
         // The effective TZ string: override > base > Z
+        // When base_tz_raw contains a named timezone (e.g. "+01:00[Europe/Stockholm]"),
+        // recalculate the DST offset for the FINAL date, not the source datetime's date.
         let tz = override_tz_str.clone().unwrap_or_else(|| {
             if base_tz_raw.is_empty() {
                 "Z".to_owned()
             } else {
-                normalize_tz(base_tz_raw)
+                let norm = normalize_tz(base_tz_raw);
+                if let Some(brk) = norm.find('[') {
+                    let tz_name = &norm[brk + 1..norm.len().saturating_sub(1)];
+                    let dp: Vec<&str> = date_part.splitn(3, '-').collect();
+                    let y: i64 = dp.get(0).and_then(|s| s.parse().ok()).unwrap_or(0);
+                    let m: i64 = dp.get(1).and_then(|s| s.parse().ok()).unwrap_or(1);
+                    let d: i64 = dp.get(2).and_then(|s| s.parse().ok()).unwrap_or(1);
+                    tc_tz_suffix_ymd(tz_name, y, m, d)
+                } else {
+                    norm
+                }
             }
         });
         // Apply UTC conversion if: base had TZ, override differs, override is provided.
