@@ -1839,6 +1839,8 @@ impl Compiler {
                                 }
                                 Expr::Literal(Literal::Null) => {
                                     self.scalar_map_exprs.insert(pi.alias.clone(), vec![]);
+                                    // null scalar is always nullable
+                                    self.nullable.insert(pi.alias.clone());
                                 }
                                 _ => {}
                             }
@@ -3115,6 +3117,18 @@ impl Compiler {
             // When the key is a compile-time string, treat as property access.
             // When both base and key are literals (constant-folding), evaluate directly.
             Expr::Subscript(base, key) => {
+                // Resolve scalar-literal variable keys (e.g. `WITH 'x' AS idx; map[idx]`).
+                let resolved_key;
+                let key = if let Expr::Variable { name, .. } = key.as_ref() {
+                    if let Some(s) = self.scalar_lit_vals.get(name.as_str()).cloned() {
+                        resolved_key = Expr::Literal(Literal::String(s));
+                        &resolved_key
+                    } else {
+                        key.as_ref()
+                    }
+                } else {
+                    key.as_ref()
+                };
                 // Constant-fold: Map[string_key] → look up key in the map.
                 if let Expr::Map(pairs) = base.as_ref() {
                     if let Some(key_str) = lqa_eval_string_expr(key) {
@@ -3129,6 +3143,7 @@ impl Compiler {
                     }
                 }
                 // Dynamic string key on a variable → treat as property access.
+                // Also handles scalar_map_exprs variables via try_get_map_pairs.
                 if let Some(key_str) = lqa_eval_string_expr(key) {
                     // Delegate to the Property handler by synthesising the expression.
                     return self.lower_expr(&Expr::Property(base.clone(), key_str));
@@ -3591,6 +3606,15 @@ impl Compiler {
                 {
                     if fname.eq_ignore_ascii_case("keys") && fargs.len() == 1 {
                         if let Some(Expr::Variable { name: var_name, .. }) = fargs.first() {
+                            // Compile-time fold: 'key' IN keys(scalar_map_var).
+                            if let Some(pairs) = self.scalar_map_exprs.get(var_name.as_str()).cloned() {
+                                let found = pairs.iter().any(|(k, _)| k == key_str);
+                                return Ok(SparExpr::Literal(SparLit::new_typed_literal(
+                                    found.to_string(),
+                                    NamedNode::new_unchecked("http://www.w3.org/2001/XMLSchema#boolean"),
+                                )));
+                            }
+                            // Node property EXISTS pattern: 'key' IN keys(node_var).
                             if self.scan_vars.contains(var_name.as_str())
                                 && !self.edge_vars.contains_key(var_name.as_str())
                             {
