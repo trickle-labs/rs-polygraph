@@ -1642,10 +1642,25 @@ impl Compiler {
                 // aggregation, e.g. `WITH count(n) AS c`), delegate to lower_projection_inner
                 // which knows how to generate the SPARQL GROUP BY / aggregate pattern.
                 if matches!(inner.as_ref(), Op::GroupBy { .. }) {
+                    // Compute which items are passthrough node variables BEFORE
+                    // lower_projection_inner may alter scan_vars.  These must NOT be
+                    // inserted into scalar_vars — they remain RDF resources that support
+                    // triple-based property access in subsequent clauses.
+                    let passthrough_node_aliases: std::collections::HashSet<String> = items
+                        .iter()
+                        .filter_map(|pi| {
+                            if let Expr::Variable { name, .. } = &pi.expr {
+                                if *name == pi.alias && self.scan_vars.contains(name.as_str()) {
+                                    return Some(name.clone());
+                                }
+                            }
+                            None
+                        })
+                        .collect();
                     let (gp, _) = self.lower_projection_inner(inner, items)?;
                     let flushed = self.flush_pending(gp);
                     for pi in items {
-                        if pi.alias != "*" {
+                        if pi.alias != "*" && !passthrough_node_aliases.contains(&pi.alias) {
                             self.scalar_vars.insert(pi.alias.clone());
                         }
                     }
@@ -3156,15 +3171,23 @@ impl Compiler {
 
                 // If the base is a scalar variable (bound via BIND/Extend, not Scan),
                 // it holds an RDF literal and cannot be the subject of a triple.
-                // Special case: if the scalar is a temporal or duration literal with a
-                // known compile-time value, extract the property at compile time.
+                // Special case 1: temporal or duration literal with a known compile-time
+                // value — extract the property at compile time.
+                // Special case 2: temporal variable with unknown runtime value — emit a
+                // SPARQL temporal function call (YEAR(?d), MONTH(?d), etc.).
                 if let Expr::Variable { name, .. } = base.as_ref() {
                     if self.scalar_vars.contains(name) {
+                        // Try compile-time extraction first.
                         if let Some(lit_val) = self.scalar_lit_vals.get(name.as_str()).cloned() {
                             let extracted = lqa_scalar_temporal_prop(&lit_val, key);
                             if let Some(spar) = extracted {
                                 return Ok(spar);
                             }
+                        }
+                        // Try runtime SPARQL temporal function (YEAR(?d), MONTH(?d), etc.).
+                        let var_expr = SparExpr::Variable(Self::var(name));
+                        if let Some(spar) = lqa_temporal_component_fn(key, var_expr) {
+                            return Ok(spar);
                         }
                         return Err(PolygraphError::Unsupported {
                             construct: "property access on scalar variable".into(),
@@ -5340,6 +5363,27 @@ fn lqa_expr_is_string(e: &Expr) -> bool {
 /// (as used inside a list or map serialization). Returns `None` for non-constants.
 /// Try to extract a Cypher temporal/duration property from a known scalar literal string.
 /// Returns the SPARQL integer literal for the component, or `None` if not recognized.
+
+/// Map a Cypher temporal component name to a SPARQL built-in function call on a
+/// runtime temporal variable. Returns `None` for components that have no direct
+/// SPARQL equivalent (week, quarter, weekYear, ordinalDay, etc.) so the caller
+/// can fall back gracefully.
+fn lqa_temporal_component_fn(component: &str, arg: SparExpr) -> Option<SparExpr> {
+    let f = match component {
+        "year" => Function::Year,
+        "month" => Function::Month,
+        "day" => Function::Day,
+        "hour" => Function::Hours,
+        "minute" => Function::Minutes,
+        "second" => Function::Seconds,
+        "timezone" => Function::Tz,   // returns string like "+01:00"
+        "offset" => Function::Tz,     // synonym
+        // No direct SPARQL equivalents for the rest.
+        _ => return None,
+    };
+    Some(SparExpr::FunctionCall(f, vec![arg]))
+}
+
 fn lqa_scalar_temporal_prop(val: &str, component: &str) -> Option<SparExpr> {
     use crate::translator::cypher as tc;
 

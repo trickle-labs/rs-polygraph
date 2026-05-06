@@ -428,7 +428,7 @@ fn lqa_safe_reason(ast: &ast::CypherQuery) -> Option<&'static str> {
             Clause::Remove(_) => clause_kinds.push("write"),
             Clause::Delete(_) => clause_kinds.push("write"),
             Clause::Merge(_) => clause_kinds.push("write"),
-            Clause::Call(_) => return Some("write_call"),
+            Clause::Call(_) => clause_kinds.push("read_call"),
             Clause::Union { .. } => clause_kinds.push("union"),
         }
     }

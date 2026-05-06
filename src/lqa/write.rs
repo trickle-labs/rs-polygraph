@@ -422,7 +422,36 @@ fn op_to_where_parts(op: &Op, base: &str) -> Result<Vec<String>, PolygraphError>
             Ok(parts)
         }
 
-        // For complex ops in write context — fall back so the whole query
+        // Transparent read-side wrappers: ordering and distinctness don't add WHERE triples
+        // or change variable names — just recurse into the inner op.
+        // Note: Limit/Skip cannot be transparently stripped because they restrict which rows
+        // to update (SPARQL UPDATE has no LIMIT/SKIP concept).
+        Op::OrderBy { inner, .. }
+        | Op::Distinct { inner, .. } => op_to_where_parts(inner, base),
+
+        // Projection (WITH clause): only transparent if all items are identity passthroughs
+        // (no renames, no expressions). A rename like `WITH n AS a` changes variable names;
+        // the write WHERE can't safely mix old/new names, so fall back to legacy.
+        Op::Projection { inner, items, .. } => {
+            let all_passthrough = items.iter().all(|pi| {
+                matches!(&pi.expr, crate::lqa::Expr::Variable { name, .. } if *name == pi.alias)
+            });
+            if all_passthrough {
+                op_to_where_parts(inner, base)
+            } else {
+                Err(write_unsupported!("write_where_complex_op"))
+            }
+        }
+
+        // GroupBy: recurse into the inner (the MATCH pattern) to generate WHERE triples.
+        // The group keys don't change which nodes are matched, only which rows are returned.
+        Op::GroupBy { inner, .. } => op_to_where_parts(inner, base),
+
+        // LIMIT / SKIP in a write context cannot be emulated safely in SPARQL UPDATE
+        // (there is no SPARQL-level LIMIT on UPDATE rows). Fall back to legacy.
+        Op::Limit { .. } | Op::Skip { .. } => Err(write_unsupported!("write_limit_skip_context")),
+
+        // For other complex ops in write context — fall back so the whole query
         // is retried on the legacy path, which has richer WHERE generation.
         _ => Err(write_unsupported!("write_where_complex_op")),
     }
