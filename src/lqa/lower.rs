@@ -13,7 +13,7 @@
 //! let op = lowerer.lower_query(&cypher_query)?;
 //! ```
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::ast::cypher::{
     self as ast, AggregateExpr, Clause, CompOp, Direction, PatternElement, QuantifierKind,
@@ -34,6 +34,10 @@ pub struct AstLowerer {
     /// Re-used variables (those seen before) are not re-scanned; they are
     /// already bound in the SPARQL context via shared variable names.
     seen_vars: HashSet<String>,
+    /// Variables bound to known literal lists in WITH/RETURN projections.
+    /// Used to substitute constant lists into UNWIND at lowering time, so
+    /// that `WITH [1,2] AS xs  UNWIND xs AS x` is handled entirely in LQA.
+    list_const_map: HashMap<String, Expr>,
 }
 
 impl AstLowerer {
@@ -41,6 +45,7 @@ impl AstLowerer {
         Self {
             counter: 0,
             seen_vars: HashSet::new(),
+            list_const_map: HashMap::new(),
         }
     }
 
@@ -141,6 +146,16 @@ impl AstLowerer {
 
             Clause::Unwind(u) => {
                 let list = self.lower_expr(&u.expression)?;
+                // Substitute a variable that was bound to a known literal list
+                // in a previous WITH/RETURN clause.  This allows patterns like
+                //   WITH [1, 2] AS prows  UNWIND prows AS p
+                // to be handled entirely in the LQA path without a legacy fallback.
+                let list = match &list {
+                    Expr::Variable { name: vname, .. } => {
+                        self.list_const_map.get(vname.as_str()).cloned().unwrap_or(list)
+                    }
+                    _ => list,
+                };
                 Ok(Op::Unwind {
                     inner: Box::new(current),
                     list,
@@ -583,6 +598,10 @@ impl AstLowerer {
                             display_name,
                         });
                     } else {
+                        // Track variable → literal list for UNWIND substitution.
+                        if matches!(expr, Expr::List(_)) {
+                            self.list_const_map.insert(alias.clone(), expr.clone());
+                        }
                         proj.push(ProjItem {
                             expr,
                             alias,

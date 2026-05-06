@@ -265,22 +265,22 @@ impl Compiler {
                     format!("[{}]", inner.join(", "))
                 }
                 E::Map(inner_pairs) => {
-                    let entries: Vec<String> = inner_pairs.iter()
+                    let entries: Vec<String> = inner_pairs
+                        .iter()
                         .map(|(k, v)| format!("{k}: {}", ser(v)))
                         .collect();
                     format!("{{{}}}", entries.join(", "))
                 }
-                E::Unary(crate::lqa::expr::UnaryOp::Neg, inner) => {
-                    match inner.as_ref() {
-                        E::Literal(ELit::Integer(n)) => format!("-{n}"),
-                        E::Literal(ELit::Float(f)) => format!("{}", -f),
-                        _ => "?".to_string(),
-                    }
-                }
+                E::Unary(crate::lqa::expr::UnaryOp::Neg, inner) => match inner.as_ref() {
+                    E::Literal(ELit::Integer(n)) => format!("-{n}"),
+                    E::Literal(ELit::Float(f)) => format!("{}", -f),
+                    _ => "?".to_string(),
+                },
                 _ => "?".to_string(),
             }
         }
-        let entries: Vec<String> = pairs.iter()
+        let entries: Vec<String> = pairs
+            .iter()
             .map(|(k, v)| format!("{k}: {}", ser(v)))
             .collect();
         format!("{{{}}}", entries.join(", "))
@@ -870,7 +870,15 @@ impl Compiler {
             // all-null input (instead of 1 row with empty collect result).
             let collect_agg_vars: std::collections::HashSet<&str> = agg_items
                 .iter()
-                .filter(|ai| matches!(&ai.expr, Expr::Aggregate { kind: AggKind::Collect, .. }))
+                .filter(|ai| {
+                    matches!(
+                        &ai.expr,
+                        Expr::Aggregate {
+                            kind: AggKind::Collect,
+                            ..
+                        }
+                    )
+                })
                 .filter_map(|ai| {
                     if let Expr::Aggregate { arg: Some(a), .. } = &ai.expr {
                         if let Expr::Variable { name, .. } = a.as_ref() {
@@ -1209,9 +1217,11 @@ impl Compiler {
                     // post-GROUP Extend (stored in self.collect_post_wraps).
                     let arg_expr = match arg {
                         Some(a) => a.as_ref(),
-                        None => return Err(PolygraphError::Translation {
-                            message: "collect() requires an argument".into(),
-                        }),
+                        None => {
+                            return Err(PolygraphError::Translation {
+                                message: "collect() requires an argument".into(),
+                            })
+                        }
                     };
                     let opt_before_inner = self.pending_optional_triples.len();
                     let arg_spar = self.lower_expr(arg_expr)?;
@@ -1234,7 +1244,9 @@ impl Compiler {
                             return Err(PolygraphError::Unsupported {
                                 construct: "collect() aggregate".into(),
                                 spec_ref: "openCypher 9 §3.4.6".into(),
-                                reason: "collect() on node/relationship variable requires legacy path".into(),
+                                reason:
+                                    "collect() on node/relationship variable requires legacy path"
+                                        .into(),
                             });
                         }
                     }
@@ -1252,16 +1264,38 @@ impl Compiler {
                         Box::new(SparExpr::FunctionCall(Function::IsLiteral, vec![v.clone()])),
                         Box::new(SparExpr::Or(
                             Box::new(SparExpr::Or(
-                                Box::new(SparExpr::Equal(Box::new(dt.clone()), Box::new(mk_nn(XSD_INTEGER)))),
-                                Box::new(SparExpr::Equal(Box::new(dt.clone()), Box::new(mk_nn(XSD_DOUBLE)))),
+                                Box::new(SparExpr::Equal(
+                                    Box::new(dt.clone()),
+                                    Box::new(mk_nn(XSD_INTEGER)),
+                                )),
+                                Box::new(SparExpr::Equal(
+                                    Box::new(dt.clone()),
+                                    Box::new(mk_nn(XSD_DOUBLE)),
+                                )),
                             )),
                             Box::new(SparExpr::Or(
-                                Box::new(SparExpr::Equal(Box::new(dt.clone()), Box::new(mk_nn(XSD_BOOLEAN)))),
+                                Box::new(SparExpr::Equal(
+                                    Box::new(dt.clone()),
+                                    Box::new(mk_nn(XSD_BOOLEAN)),
+                                )),
                                 Box::new(SparExpr::Or(
-                                    Box::new(SparExpr::Equal(Box::new(dt.clone()), Box::new(mk_nn("http://www.w3.org/2001/XMLSchema#long")))),
+                                    Box::new(SparExpr::Equal(
+                                        Box::new(dt.clone()),
+                                        Box::new(mk_nn("http://www.w3.org/2001/XMLSchema#long")),
+                                    )),
                                     Box::new(SparExpr::Or(
-                                        Box::new(SparExpr::Equal(Box::new(dt.clone()), Box::new(mk_nn("http://www.w3.org/2001/XMLSchema#decimal")))),
-                                        Box::new(SparExpr::Equal(Box::new(dt), Box::new(mk_nn("http://www.w3.org/2001/XMLSchema#float")))),
+                                        Box::new(SparExpr::Equal(
+                                            Box::new(dt.clone()),
+                                            Box::new(mk_nn(
+                                                "http://www.w3.org/2001/XMLSchema#decimal",
+                                            )),
+                                        )),
+                                        Box::new(SparExpr::Equal(
+                                            Box::new(dt),
+                                            Box::new(mk_nn(
+                                                "http://www.w3.org/2001/XMLSchema#float",
+                                            )),
+                                        )),
                                     )),
                                 )),
                             )),
@@ -1270,14 +1304,18 @@ impl Compiler {
                     let enc = SparExpr::If(
                         Box::new(is_num_or_bool),
                         Box::new(SparExpr::FunctionCall(Function::Str, vec![v.clone()])),
-                        Box::new(SparExpr::FunctionCall(Function::Concat, vec![
-                            SparExpr::Literal(SparLit::new_simple_literal("'")),
-                            SparExpr::FunctionCall(Function::Str, vec![v]),
-                            SparExpr::Literal(SparLit::new_simple_literal("'")),
-                        ])),
+                        Box::new(SparExpr::FunctionCall(
+                            Function::Concat,
+                            vec![
+                                SparExpr::Literal(SparLit::new_simple_literal("'")),
+                                SparExpr::FunctionCall(Function::Str, vec![v]),
+                                SparExpr::Literal(SparLit::new_simple_literal("'")),
+                            ],
+                        )),
                     );
                     let raw_gc_var = self.fresh("gc_raw");
-                    self.collect_post_wraps.push((ai.alias.clone(), raw_gc_var.clone()));
+                    self.collect_post_wraps
+                        .push((ai.alias.clone(), raw_gc_var.clone()));
                     let gc_agg = AggregateExpression::FunctionCall {
                         name: AggregateFunction::GroupConcat {
                             separator: Some(", ".to_string()),
@@ -1801,9 +1839,7 @@ impl Compiler {
                             if let Expr::Variable { name, .. } = &pi.expr {
                                 if *name == pi.alias
                                     && (self.scan_vars.contains(name.as_str())
-                                        || group_vars
-                                            .iter()
-                                            .any(|v| v.as_str() == name.as_str()))
+                                        || group_vars.iter().any(|v| v.as_str() == name.as_str()))
                                 {
                                     return Some(pi.alias.as_str());
                                 }
@@ -1812,7 +1848,8 @@ impl Compiler {
                         })
                         .collect();
                     for pi in items {
-                        if pi.alias != "*" && !passthrough_node_aliases.contains(pi.alias.as_str()) {
+                        if pi.alias != "*" && !passthrough_node_aliases.contains(pi.alias.as_str())
+                        {
                             self.scalar_vars.insert(pi.alias.clone());
                         }
                     }
@@ -1976,7 +2013,8 @@ impl Compiler {
                             // access on null returns null, so register empty pairs.
                             match &pi.expr {
                                 Expr::Map(pairs) => {
-                                    self.scalar_map_exprs.insert(pi.alias.clone(), pairs.clone());
+                                    self.scalar_map_exprs
+                                        .insert(pi.alias.clone(), pairs.clone());
                                 }
                                 Expr::Literal(Literal::Null) => {
                                     self.scalar_map_exprs.insert(pi.alias.clone(), vec![]);
@@ -2006,9 +2044,7 @@ impl Compiler {
                             // Secondary source: value computed by lower_expr (e.g. temporal
                             // constructors that produce a typed literal at compile time).
                             if let Some(val) = computed_lit_val {
-                                self.scalar_lit_vals
-                                    .entry(pi.alias.clone())
-                                    .or_insert(val);
+                                self.scalar_lit_vals.entry(pi.alias.clone()).or_insert(val);
                             }
                         }
                     }
@@ -2210,15 +2246,17 @@ impl Compiler {
                             if items.is_empty() {
                                 return Ok(inner_pat);
                             }
-                            let bindings: Vec<Vec<Option<spargebra::term::GroundTerm>>> =
-                                items.iter().map(|n| {
+                            let bindings: Vec<Vec<Option<spargebra::term::GroundTerm>>> = items
+                                .iter()
+                                .map(|n| {
                                     vec![Some(spargebra::term::GroundTerm::Literal(
                                         SparLit::new_typed_literal(
                                             n.to_string(),
                                             NamedNode::new_unchecked(XSD_INTEGER),
                                         ),
                                     ))]
-                                }).collect();
+                                })
+                                .collect();
                             self.scan_vars.insert(variable.clone());
                             let values = GraphPattern::Values {
                                 variables: vec![var],
@@ -2257,8 +2295,7 @@ impl Compiler {
                                 )
                             };
 
-                            if let Some(edge_info) =
-                                self.edge_vars.get(var_name.as_str()).cloned()
+                            if let Some(edge_info) = self.edge_vars.get(var_name.as_str()).cloned()
                             {
                                 // Edge variable: expand via RDF-star reification.
                                 // ?_keys_reif rdf:reifies <<subj pred obj>> .
@@ -2268,44 +2305,34 @@ impl Compiler {
                                 let rdf_reifies = NamedNode::new_unchecked(
                                     "http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies",
                                 );
-                                let subj_tp =
-                                    TermPattern::Variable(Self::var(&edge_info.subj));
-                                let obj_tp =
-                                    TermPattern::Variable(Self::var(&edge_info.obj));
+                                let subj_tp = TermPattern::Variable(Self::var(&edge_info.subj));
+                                let obj_tp = TermPattern::Variable(Self::var(&edge_info.obj));
                                 let pred_pat = match &edge_info.pred {
                                     EdgePred::Static(iri) => {
                                         NamedNodePattern::NamedNode(iri.clone())
                                     }
-                                    EdgePred::Dynamic(v) => {
-                                        NamedNodePattern::Variable(v.clone())
-                                    }
+                                    EdgePred::Dynamic(v) => NamedNodePattern::Variable(v.clone()),
                                 };
-                                let edge_triple_tp =
-                                    TermPattern::Triple(Box::new(TriplePattern {
-                                        subject: subj_tp,
-                                        predicate: pred_pat,
-                                        object: obj_tp,
-                                    }));
+                                let edge_triple_tp = TermPattern::Triple(Box::new(TriplePattern {
+                                    subject: subj_tp,
+                                    predicate: pred_pat,
+                                    object: obj_tp,
+                                }));
                                 let bgp = GraphPattern::Bgp {
                                     patterns: vec![
                                         TriplePattern {
                                             subject: TermPattern::Variable(reif_var.clone()),
-                                            predicate: NamedNodePattern::NamedNode(
-                                                rdf_reifies,
-                                            ),
+                                            predicate: NamedNodePattern::NamedNode(rdf_reifies),
                                             object: edge_triple_tp,
                                         },
                                         TriplePattern {
                                             subject: TermPattern::Variable(reif_var),
-                                            predicate: NamedNodePattern::Variable(
-                                                pred_v.clone(),
-                                            ),
+                                            predicate: NamedNodePattern::Variable(pred_v.clone()),
                                             object: TermPattern::Variable(val_v),
                                         },
                                     ],
                                 };
-                                let base_lit =
-                                    SparExpr::Literal(SparLit::new_simple_literal(base));
+                                let base_lit = SparExpr::Literal(SparLit::new_simple_literal(base));
                                 let str_pred = SparExpr::FunctionCall(
                                     Function::Str,
                                     vec![SparExpr::Variable(pred_v.clone())],
@@ -2343,25 +2370,20 @@ impl Compiler {
                                 //        && STR(?pred)!=rdf:type
                                 //        [&& BOUND(?n)])
                                 let node_v = Self::var(var_name);
-                                let sentinel_str =
-                                    format!("{base}__node");
+                                let sentinel_str = format!("{base}__node");
                                 let bgp = GraphPattern::Bgp {
                                     patterns: vec![TriplePattern {
                                         subject: TermPattern::Variable(node_v.clone()),
-                                        predicate: NamedNodePattern::Variable(
-                                            pred_v.clone(),
-                                        ),
+                                        predicate: NamedNodePattern::Variable(pred_v.clone()),
                                         object: TermPattern::Variable(val_v),
                                     }],
                                 };
-                                let base_lit =
-                                    SparExpr::Literal(SparLit::new_simple_literal(base));
-                                let rdf_type_lit = SparExpr::Literal(
-                                    SparLit::new_simple_literal(RDF_TYPE.to_string()),
-                                );
-                                let sentinel_lit = SparExpr::Literal(
-                                    SparLit::new_simple_literal(sentinel_str),
-                                );
+                                let base_lit = SparExpr::Literal(SparLit::new_simple_literal(base));
+                                let rdf_type_lit = SparExpr::Literal(SparLit::new_simple_literal(
+                                    RDF_TYPE.to_string(),
+                                ));
+                                let sentinel_lit =
+                                    SparExpr::Literal(SparLit::new_simple_literal(sentinel_str));
                                 let str_pred = SparExpr::FunctionCall(
                                     Function::Str,
                                     vec![SparExpr::Variable(pred_v.clone())],
@@ -2370,12 +2392,10 @@ impl Compiler {
                                     Function::StrStarts,
                                     vec![str_pred.clone(), base_lit],
                                 );
-                                let not_sentinel = SparExpr::Not(Box::new(
-                                    SparExpr::Equal(
-                                        Box::new(str_pred.clone()),
-                                        Box::new(sentinel_lit),
-                                    ),
-                                ));
+                                let not_sentinel = SparExpr::Not(Box::new(SparExpr::Equal(
+                                    Box::new(str_pred.clone()),
+                                    Box::new(sentinel_lit),
+                                )));
                                 let not_type = SparExpr::Not(Box::new(SparExpr::Equal(
                                     Box::new(str_pred),
                                     Box::new(rdf_type_lit),
@@ -2740,8 +2760,7 @@ impl Compiler {
             let pats: Vec<GraphPattern> = rel_types
                 .iter()
                 .map(|rt| {
-                    let iri =
-                        NamedNode::new_unchecked(format!("{}{}", self.base_iri, rt));
+                    let iri = NamedNode::new_unchecked(format!("{}{}", self.base_iri, rt));
                     let pred = NamedNodePattern::NamedNode(iri);
                     self.lower_expand_typed(from_tp.clone(), pred, to_tp.clone(), direction)
                 })
@@ -3451,7 +3470,9 @@ impl Compiler {
                             return Ok(spar);
                         }
                         return Err(PolygraphError::Unsupported {
-                            construct: format!("property access on scalar variable .{key} (var={name})"),
+                            construct: format!(
+                                "property access on scalar variable .{key} (var={name})"
+                            ),
                             spec_ref: "openCypher 9 §6.1".into(),
                             reason: format!(
                                 "Variable `{name}` is bound to a scalar value (not a node); \
@@ -3554,36 +3575,41 @@ impl Compiler {
                     let str_a = SparExpr::FunctionCall(Function::Str, vec![la.clone()]);
                     let is_list = SparExpr::FunctionCall(
                         Function::StrStarts,
-                        vec![str_a.clone(), SparExpr::Literal(SparLit::new_simple_literal("["))],
+                        vec![
+                            str_a.clone(),
+                            SparExpr::Literal(SparLit::new_simple_literal("[")),
+                        ],
                     );
                     let is_dur = SparExpr::FunctionCall(
                         Function::StrStarts,
-                        vec![str_a.clone(), SparExpr::Literal(SparLit::new_simple_literal("P"))],
+                        vec![
+                            str_a.clone(),
+                            SparExpr::Literal(SparLit::new_simple_literal("P")),
+                        ],
                     );
                     // List concat: trim trailing ']' of a, leading '[' of b, join with ", ".
                     let one = SparExpr::Literal(SparLit::new_typed_literal(
-                        "1", NamedNode::new_unchecked(XSD_INTEGER),
+                        "1",
+                        NamedNode::new_unchecked(XSD_INTEGER),
                     ));
                     let two = SparExpr::Literal(SparLit::new_typed_literal(
-                        "2", NamedNode::new_unchecked(XSD_INTEGER),
+                        "2",
+                        NamedNode::new_unchecked(XSD_INTEGER),
                     ));
                     let strlen_a = SparExpr::FunctionCall(Function::StrLen, vec![la.clone()]);
-                    let len_minus_1 =
-                        SparExpr::Subtract(Box::new(strlen_a), Box::new(one.clone()));
+                    let len_minus_1 = SparExpr::Subtract(Box::new(strlen_a), Box::new(one.clone()));
                     let head = SparExpr::FunctionCall(
-                        Function::SubStr, vec![la.clone(), one, len_minus_1],
+                        Function::SubStr,
+                        vec![la.clone(), one, len_minus_1],
                     );
-                    let tail =
-                        SparExpr::FunctionCall(Function::SubStr, vec![lb.clone(), two]);
+                    let tail = SparExpr::FunctionCall(Function::SubStr, vec![lb.clone(), two]);
                     let sep = SparExpr::Literal(SparLit::new_simple_literal(", "));
                     let list_concat =
                         SparExpr::FunctionCall(Function::Concat, vec![head, sep, tail]);
                     // Duration add: urn:polygraph:duration-add(STR(?a), STR(?b))
                     let str_b = SparExpr::FunctionCall(Function::Str, vec![lb.clone()]);
                     let dur_add = SparExpr::FunctionCall(
-                        Function::Custom(NamedNode::new_unchecked(
-                            "urn:polygraph:duration-add",
-                        )),
+                        Function::Custom(NamedNode::new_unchecked("urn:polygraph:duration-add")),
                         vec![str_a, str_b],
                     );
                     let numeric_add = SparExpr::Add(Box::new(la), Box::new(lb));
@@ -3624,7 +3650,10 @@ impl Compiler {
                     let str_a = SparExpr::FunctionCall(Function::Str, vec![la.clone()]);
                     let is_dur = SparExpr::FunctionCall(
                         Function::StrStarts,
-                        vec![str_a.clone(), SparExpr::Literal(SparLit::new_simple_literal("P"))],
+                        vec![
+                            str_a.clone(),
+                            SparExpr::Literal(SparLit::new_simple_literal("P")),
+                        ],
                     );
                     let str_b = SparExpr::FunctionCall(Function::Str, vec![rb.clone()]);
                     let dur_sub = SparExpr::FunctionCall(
@@ -3651,7 +3680,10 @@ impl Compiler {
                     let str_a = SparExpr::FunctionCall(Function::Str, vec![la.clone()]);
                     let is_dur = SparExpr::FunctionCall(
                         Function::StrStarts,
-                        vec![str_a.clone(), SparExpr::Literal(SparLit::new_simple_literal("P"))],
+                        vec![
+                            str_a.clone(),
+                            SparExpr::Literal(SparLit::new_simple_literal("P")),
+                        ],
                     );
                     let str_b = SparExpr::FunctionCall(Function::Str, vec![rb.clone()]);
                     let dur_mul = SparExpr::FunctionCall(
@@ -3680,7 +3712,10 @@ impl Compiler {
                     let str_a = SparExpr::FunctionCall(Function::Str, vec![la.clone()]);
                     let is_dur = SparExpr::FunctionCall(
                         Function::StrStarts,
-                        vec![str_a.clone(), SparExpr::Literal(SparLit::new_simple_literal("P"))],
+                        vec![
+                            str_a.clone(),
+                            SparExpr::Literal(SparLit::new_simple_literal("P")),
+                        ],
                     );
                     let str_b = SparExpr::FunctionCall(Function::Str, vec![rb.clone()]);
                     let dur_div = SparExpr::FunctionCall(
@@ -3777,13 +3812,14 @@ impl Compiler {
                 // (Cypher list ordering is element-wise and typed, not lexicographic on the
                 // serialised string).  Return Err so legacy handles these cases.
                 if matches!(op, CmpOp::Lt | CmpOp::Le | CmpOp::Gt | CmpOp::Ge)
-                    && (matches!(a.as_ref(), Expr::List(_))
-                        || matches!(b.as_ref(), Expr::List(_)))
+                    && (matches!(a.as_ref(), Expr::List(_)) || matches!(b.as_ref(), Expr::List(_)))
                 {
                     return Err(PolygraphError::Unsupported {
                         construct: "list ordering comparison in LQA SPARQL lowering".into(),
                         spec_ref: "openCypher 9 §7.3".into(),
-                        reason: "list ordering not yet supported in LQA path; legacy fallback applies".into(),
+                        reason:
+                            "list ordering not yet supported in LQA path; legacy fallback applies"
+                                .into(),
                     });
                 }
                 // Guard: list/map equality/inequality when null is present differs from plain
@@ -3824,17 +3860,25 @@ impl Compiler {
                 if let (
                     CmpOp::In,
                     Expr::Literal(Literal::String(key_str)),
-                    Expr::FunctionCall { name: fname, args: fargs, .. },
+                    Expr::FunctionCall {
+                        name: fname,
+                        args: fargs,
+                        ..
+                    },
                 ) = (op, a.as_ref(), b.as_ref())
                 {
                     if fname.eq_ignore_ascii_case("keys") && fargs.len() == 1 {
                         if let Some(Expr::Variable { name: var_name, .. }) = fargs.first() {
                             // Compile-time fold: 'key' IN keys(scalar_map_var).
-                            if let Some(pairs) = self.scalar_map_exprs.get(var_name.as_str()).cloned() {
+                            if let Some(pairs) =
+                                self.scalar_map_exprs.get(var_name.as_str()).cloned()
+                            {
                                 let found = pairs.iter().any(|(k, _)| k == key_str);
                                 return Ok(SparExpr::Literal(SparLit::new_typed_literal(
                                     found.to_string(),
-                                    NamedNode::new_unchecked("http://www.w3.org/2001/XMLSchema#boolean"),
+                                    NamedNode::new_unchecked(
+                                        "http://www.w3.org/2001/XMLSchema#boolean",
+                                    ),
                                 )));
                             }
                             // Node property EXISTS pattern: 'key' IN keys(node_var).
@@ -3893,7 +3937,7 @@ impl Compiler {
                             Function::Custom(NamedNode::new_unchecked(
                                 "urn:polygraph:list-contains",
                             )),
-                            vec![lb, la],  // list string first, needle second
+                            vec![lb, la], // list string first, needle second
                         )
                     }
                     CmpOp::StartsWith | CmpOp::EndsWith | CmpOp::Contains | CmpOp::RegexMatch => {
@@ -4487,9 +4531,8 @@ impl Compiler {
                         // Only use compile-time CONCAT when no node is nullable.
                         // If the path comes from OPTIONAL MATCH the nodes may be
                         // absent; in that case fall through to legacy.
-                        let any_nullable = node_vars
-                            .iter()
-                            .any(|v| self.nullable.contains(v.as_str()));
+                        let any_nullable =
+                            node_vars.iter().any(|v| self.nullable.contains(v.as_str()));
                         if !any_nullable {
                             let mut parts: Vec<SparExpr> = vec![Self::lit_str("[")];
                             for (idx, v) in node_vars.iter().enumerate() {
@@ -4690,7 +4733,8 @@ impl Compiler {
             "rand" => Err(PolygraphError::Unsupported {
                 construct: "rand()".into(),
                 spec_ref: "openCypher 9 §6.3.2".into(),
-                reason: "rand() inside aggregates raises SyntaxError; legacy fallback needed".into(),
+                reason: "rand() inside aggregates raises SyntaxError; legacy fallback needed"
+                    .into(),
             }),
             "sqrt" => {
                 // Constant-fold sqrt() when argument is a numeric literal.
@@ -4728,9 +4772,7 @@ impl Compiler {
                     // Identity on booleans.
                     Expr::Literal(Literal::Boolean(b)) => Ok(Self::lit_bool(*b)),
                     // Null propagation.
-                    Expr::Literal(Literal::Null) => {
-                        Ok(SparExpr::Variable(self.fresh("_tob_null")))
-                    }
+                    Expr::Literal(Literal::Null) => Ok(SparExpr::Variable(self.fresh("_tob_null"))),
                     // Constant string → boolean.
                     Expr::Literal(Literal::String(s)) => match s.to_lowercase().as_str() {
                         "true" => Ok(Self::lit_bool(true)),
@@ -4805,26 +4847,37 @@ impl Compiler {
             // plus their .transaction/.statement/.realtime variants (current-time stubs).
             // All calendar arithmetic is performed at translation time using the
             // same helpers used by the legacy translator path.
-            "date" | "localtime" | "localdatetime" | "time" | "datetime" | "duration"
-            | "date.transaction" | "date.statement" | "date.realtime"
-            | "localtime.transaction" | "localtime.statement" | "localtime.realtime"
-            | "time.transaction" | "time.statement" | "time.realtime"
-            | "localdatetime.transaction" | "localdatetime.statement" | "localdatetime.realtime"
-            | "datetime.transaction" | "datetime.statement" | "datetime.realtime" => {
+            "date"
+            | "localtime"
+            | "localdatetime"
+            | "time"
+            | "datetime"
+            | "duration"
+            | "date.transaction"
+            | "date.statement"
+            | "date.realtime"
+            | "localtime.transaction"
+            | "localtime.statement"
+            | "localtime.realtime"
+            | "time.transaction"
+            | "time.statement"
+            | "time.realtime"
+            | "localdatetime.transaction"
+            | "localdatetime.statement"
+            | "localdatetime.realtime"
+            | "datetime.transaction"
+            | "datetime.statement"
+            | "datetime.realtime" => {
                 use crate::translator::cypher::{
-                    temporal_date_from_map, temporal_datetime_from_map,
+                    strip_named_tz, temporal_date_from_map, temporal_datetime_from_map,
                     temporal_duration_from_map, temporal_localdatetime_from_map,
                     temporal_localtime_from_map, temporal_parse_date, temporal_parse_datetime,
                     temporal_parse_duration, temporal_parse_localdatetime,
                     temporal_parse_localtime, temporal_parse_time, temporal_time_from_map,
-                    strip_named_tz,
                 };
-                let xsd_date =
-                    NamedNode::new_unchecked("http://www.w3.org/2001/XMLSchema#date");
-                let xsd_time =
-                    NamedNode::new_unchecked("http://www.w3.org/2001/XMLSchema#time");
-                let xsd_dt =
-                    NamedNode::new_unchecked("http://www.w3.org/2001/XMLSchema#dateTime");
+                let xsd_date = NamedNode::new_unchecked("http://www.w3.org/2001/XMLSchema#date");
+                let xsd_time = NamedNode::new_unchecked("http://www.w3.org/2001/XMLSchema#time");
+                let xsd_dt = NamedNode::new_unchecked("http://www.w3.org/2001/XMLSchema#dateTime");
                 // Strip .transaction/.statement/.realtime suffix for dispatch.
                 let base_func = name_lower
                     .strip_suffix(".transaction")
@@ -4836,21 +4889,17 @@ impl Compiler {
                 if args.is_empty() {
                     let lit = match base_func {
                         "date" => SparLit::new_typed_literal("2000-01-01".to_owned(), xsd_date),
-                        "localtime" => SparLit::new_typed_literal(
-                            "00:00:00".to_owned(),
-                            xsd_time.clone(),
-                        ),
-                        "time" => {
-                            SparLit::new_typed_literal("00:00:00Z".to_owned(), xsd_time)
+                        "localtime" => {
+                            SparLit::new_typed_literal("00:00:00".to_owned(), xsd_time.clone())
                         }
+                        "time" => SparLit::new_typed_literal("00:00:00Z".to_owned(), xsd_time),
                         "localdatetime" => SparLit::new_typed_literal(
                             "2000-01-01T00:00:00".to_owned(),
                             xsd_dt.clone(),
                         ),
-                        "datetime" => SparLit::new_typed_literal(
-                            "2000-01-01T00:00Z".to_owned(),
-                            xsd_dt,
-                        ),
+                        "datetime" => {
+                            SparLit::new_typed_literal("2000-01-01T00:00Z".to_owned(), xsd_dt)
+                        }
                         "duration" => SparLit::new_simple_literal("PT0S".to_owned()),
                         _ => return Ok(SparExpr::Variable(self.fresh("null"))),
                     };
@@ -4902,7 +4951,10 @@ impl Compiler {
                                     break;
                                 }
                             }
-                            _ => { all_resolvable = false; break; }
+                            _ => {
+                                all_resolvable = false;
+                                break;
+                            }
                         };
                         expanded.push((k.clone(), ae));
                     }
@@ -4932,18 +4984,19 @@ impl Compiler {
                 if let Some(Expr::Literal(Literal::String(s))) = args.first() {
                     let s = s.clone();
                     let lit_opt: Option<SparLit> = match base_func {
-                        "date" => temporal_parse_date(&s)
-                            .map(|v| SparLit::new_typed_literal(v, xsd_date)),
+                        "date" => {
+                            temporal_parse_date(&s).map(|v| SparLit::new_typed_literal(v, xsd_date))
+                        }
                         "localtime" => temporal_parse_localtime(&s)
                             .map(|v| SparLit::new_typed_literal(v, xsd_time.clone())),
-                        "time" => temporal_parse_time(&s)
-                            .map(|v| SparLit::new_typed_literal(v, xsd_time)),
+                        "time" => {
+                            temporal_parse_time(&s).map(|v| SparLit::new_typed_literal(v, xsd_time))
+                        }
                         "localdatetime" => temporal_parse_localdatetime(&s)
                             .map(|v| SparLit::new_typed_literal(v, xsd_dt.clone())),
                         "datetime" => temporal_parse_datetime(&s)
                             .map(|v| SparLit::new_typed_literal(v, xsd_dt)),
-                        "duration" => temporal_parse_duration(&s)
-                            .map(SparLit::new_simple_literal),
+                        "duration" => temporal_parse_duration(&s).map(SparLit::new_simple_literal),
                         _ => None,
                     };
                     if let Some(lit) = lit_opt {
@@ -4988,15 +5041,19 @@ impl Compiler {
                 })?;
                 match arg {
                     Expr::Map(pairs) => {
-                        let key_list: Vec<String> = pairs.iter().map(|(k, _)| format!("'{k}'")).collect();
-                        Ok(SparExpr::Literal(SparLit::new_simple_literal(
-                            format!("[{}]", key_list.join(", ")),
-                        )))
+                        let key_list: Vec<String> =
+                            pairs.iter().map(|(k, _)| format!("'{k}'")).collect();
+                        Ok(SparExpr::Literal(SparLit::new_simple_literal(format!(
+                            "[{}]",
+                            key_list.join(", ")
+                        ))))
                     }
                     Expr::Literal(crate::lqa::expr::Literal::Null) => {
                         Ok(SparExpr::Variable(self.fresh("_null")))
                     }
-                    Expr::Variable { name: vname, .. } if self.nullable.contains(vname.as_str()) => {
+                    Expr::Variable { name: vname, .. }
+                        if self.nullable.contains(vname.as_str()) =>
+                    {
                         Ok(SparExpr::Variable(self.fresh("_null")))
                     }
                     _ => Err(PolygraphError::Unsupported {
@@ -5019,7 +5076,9 @@ impl Compiler {
                     Expr::Literal(crate::lqa::expr::Literal::Null) => {
                         Ok(SparExpr::Variable(self.fresh("_null")))
                     }
-                    Expr::Variable { name: vname, .. } if self.nullable.contains(vname.as_str()) => {
+                    Expr::Variable { name: vname, .. }
+                        if self.nullable.contains(vname.as_str()) =>
+                    {
                         Ok(SparExpr::Variable(self.fresh("_null")))
                     }
                     Expr::Variable { name: vname, .. } => {
@@ -5046,14 +5105,19 @@ impl Compiler {
                         let inner_bgp = GraphPattern::Bgp {
                             patterns: vec![TriplePattern {
                                 subject: TermPattern::Variable(n_var.clone()),
-                                predicate: NamedNodePattern::NamedNode(NamedNode::new_unchecked(RDF_TYPE)),
+                                predicate: NamedNodePattern::NamedNode(NamedNode::new_unchecked(
+                                    RDF_TYPE,
+                                )),
                                 object: TermPattern::Variable(ltype_var.clone()),
                             }],
                         };
                         let filter_expr = SparExpr::FunctionCall(
                             Function::StrStarts,
                             vec![
-                                SparExpr::FunctionCall(Function::Str, vec![SparExpr::Variable(ltype_var.clone())]),
+                                SparExpr::FunctionCall(
+                                    Function::Str,
+                                    vec![SparExpr::Variable(ltype_var.clone())],
+                                ),
                                 SparExpr::Literal(SparLit::new_simple_literal(base)),
                             ],
                         );
@@ -5065,7 +5129,10 @@ impl Compiler {
                         let label_name_expr = SparExpr::FunctionCall(
                             Function::SubStr,
                             vec![
-                                SparExpr::FunctionCall(Function::Str, vec![SparExpr::Variable(ltype_var.clone())]),
+                                SparExpr::FunctionCall(
+                                    Function::Str,
+                                    vec![SparExpr::Variable(ltype_var.clone())],
+                                ),
                                 SparExpr::Literal(SparLit::new_typed_literal(
                                     (base_len + 1).to_string(),
                                     NamedNode::new_unchecked(XSD_INTEGER),
@@ -5132,7 +5199,9 @@ impl Compiler {
                         let serialized = Self::serialize_map_literal(pairs);
                         Ok(SparExpr::Literal(SparLit::new_simple_literal(serialized)))
                     }
-                    Expr::Variable { name: vname, .. } if self.nullable.contains(vname.as_str()) => {
+                    Expr::Variable { name: vname, .. }
+                        if self.nullable.contains(vname.as_str()) =>
+                    {
                         Ok(SparExpr::Variable(self.fresh("_null")))
                     }
                     _ => Err(PolygraphError::Unsupported {
@@ -5144,22 +5213,53 @@ impl Compiler {
             }
             // Known openCypher functions that are valid but not yet implemented in the
             // LQA SPARQL path — fall through to legacy rather than raising a hard error.
-            "datetime.truncate" | "localdatetime.truncate" | "date.truncate"
-            | "time.truncate" | "localtime.truncate"
-            | "duration.between" | "duration.inmonths" | "duration.indays"
-            | "duration.inseconds" | "datetime.fromepoch" | "datetime.fromepochmillis"
-            | "sin" | "cos" | "tan" | "asin" | "acos" | "atan" | "atan2" | "cot"
-            | "degrees" | "radians" | "haversin" | "log" | "log10" | "e" | "pi"
-            | "reduce" | "any" | "all" | "none" | "single"
-            | "relationships" | "shortestpath" | "allshortestpaths"
-            | "split" | "replace" | "left" | "right"
-            | "collect" | "percentiledisc" | "percentilecont" | "stdev" | "stdevp" => {
-                Err(PolygraphError::Unsupported {
-                    construct: format!("{name}()"),
-                    spec_ref: "openCypher 9 §6.3".into(),
-                    reason: format!("function '{name}' not yet in LQA path; legacy fallback applies"),
-                })
-            }
+            "datetime.truncate"
+            | "localdatetime.truncate"
+            | "date.truncate"
+            | "time.truncate"
+            | "localtime.truncate"
+            | "duration.between"
+            | "duration.inmonths"
+            | "duration.indays"
+            | "duration.inseconds"
+            | "datetime.fromepoch"
+            | "datetime.fromepochmillis"
+            | "sin"
+            | "cos"
+            | "tan"
+            | "asin"
+            | "acos"
+            | "atan"
+            | "atan2"
+            | "cot"
+            | "degrees"
+            | "radians"
+            | "haversin"
+            | "log"
+            | "log10"
+            | "e"
+            | "pi"
+            | "reduce"
+            | "any"
+            | "all"
+            | "none"
+            | "single"
+            | "relationships"
+            | "shortestpath"
+            | "allshortestpaths"
+            | "split"
+            | "replace"
+            | "left"
+            | "right"
+            | "collect"
+            | "percentiledisc"
+            | "percentilecont"
+            | "stdev"
+            | "stdevp" => Err(PolygraphError::Unsupported {
+                construct: format!("{name}()"),
+                spec_ref: "openCypher 9 §6.3".into(),
+                reason: format!("function '{name}' not yet in LQA path; legacy fallback applies"),
+            }),
             _ => {
                 // Truly unknown function: raise a Translation/SyntaxError.
                 Err(PolygraphError::Translation {
@@ -5195,72 +5295,117 @@ impl Compiler {
         use spargebra::algebra::Function;
         type SE = SparExpr;
 
-        let xsi_nn  = NamedNode::new_unchecked("http://www.w3.org/2001/XMLSchema#integer");
+        let xsi_nn = NamedNode::new_unchecked("http://www.w3.org/2001/XMLSchema#integer");
         let xsd_dec = NamedNode::new_unchecked("http://www.w3.org/2001/XMLSchema#decimal");
 
-        let d_var  = SE::Variable(Self::var(var_name));
-        let str_e  = SE::FunctionCall(Function::Str, vec![d_var]);
+        let d_var = SE::Variable(Self::var(var_name));
+        let str_e = SE::FunctionCall(Function::Str, vec![d_var]);
 
         // ── arithmetic / cast helpers (all produce SparExpr inline) ──────────
-        macro_rules! dim  { ($n:expr) => { SE::Literal(SparLit::new_typed_literal(
-            ($n as i64).to_string(), xsi_nn.clone())) }; }
-        macro_rules! ddm  { ($s:expr) => { SE::Literal(SparLit::new_typed_literal(
-            $s.to_owned(), xsd_dec.clone())) }; }
-        macro_rules! int_cast { ($e:expr) => {
-            SE::FunctionCall(Function::Custom(xsi_nn.clone()), vec![$e]) }; }
-        macro_rules! dec_cast { ($e:expr) => {
-            SE::FunctionCall(Function::Custom(xsd_dec.clone()), vec![$e]) }; }
-        macro_rules! substr2 { ($s:expr, $st:expr, $ln:expr) => {
-            SE::FunctionCall(Function::SubStr, vec![$s, dim!($st), dim!($ln)]) }; }
-        macro_rules! floor_f { ($e:expr) => { SE::FunctionCall(Function::Floor, vec![$e]) }; }
-        macro_rules! add  { ($a:expr, $b:expr) => { SE::Add(Box::new($a), Box::new($b)) }; }
-        macro_rules! sub  { ($a:expr, $b:expr) => { SE::Subtract(Box::new($a), Box::new($b)) }; }
-        macro_rules! mul  { ($a:expr, $b:expr) => { SE::Multiply(Box::new($a), Box::new($b)) }; }
-        macro_rules! div  { ($a:expr, $b:expr) => { SE::Divide(Box::new($a), Box::new($b)) }; }
+        macro_rules! dim {
+            ($n:expr) => {
+                SE::Literal(SparLit::new_typed_literal(
+                    ($n as i64).to_string(),
+                    xsi_nn.clone(),
+                ))
+            };
+        }
+        macro_rules! ddm {
+            ($s:expr) => {
+                SE::Literal(SparLit::new_typed_literal($s.to_owned(), xsd_dec.clone()))
+            };
+        }
+        macro_rules! int_cast {
+            ($e:expr) => {
+                SE::FunctionCall(Function::Custom(xsi_nn.clone()), vec![$e])
+            };
+        }
+        macro_rules! dec_cast {
+            ($e:expr) => {
+                SE::FunctionCall(Function::Custom(xsd_dec.clone()), vec![$e])
+            };
+        }
+        macro_rules! substr2 {
+            ($s:expr, $st:expr, $ln:expr) => {
+                SE::FunctionCall(Function::SubStr, vec![$s, dim!($st), dim!($ln)])
+            };
+        }
+        macro_rules! floor_f {
+            ($e:expr) => {
+                SE::FunctionCall(Function::Floor, vec![$e])
+            };
+        }
+        macro_rules! add {
+            ($a:expr, $b:expr) => {
+                SE::Add(Box::new($a), Box::new($b))
+            };
+        }
+        macro_rules! sub {
+            ($a:expr, $b:expr) => {
+                SE::Subtract(Box::new($a), Box::new($b))
+            };
+        }
+        macro_rules! mul {
+            ($a:expr, $b:expr) => {
+                SE::Multiply(Box::new($a), Box::new($b))
+            };
+        }
+        macro_rules! div {
+            ($a:expr, $b:expr) => {
+                SE::Divide(Box::new($a), Box::new($b))
+            };
+        }
 
         // Push intermediate bind; returns SparExpr::Variable referencing it.
-        macro_rules! bind { ($hint:literal, $expr:expr) => {{
-            let v = self.fresh(concat!("tp_", $hint));
-            self.pending_binds.push((v.clone(), $expr));
-            SE::Variable(v)
-        }}; }
+        macro_rules! bind {
+            ($hint:literal, $expr:expr) => {{
+                let v = self.fresh(concat!("tp_", $hint));
+                self.pending_binds.push((v.clone(), $expr));
+                SE::Variable(v)
+            }};
+        }
 
         // ── Date component extraction (string-based, works for xsd:date/dateTime) ─
-        let v_Y  = bind!("Y",  int_cast!(substr2!(str_e.clone(), 1, 4)));
-        let v_M  = bind!("M",  int_cast!(substr2!(str_e.clone(), 6, 2)));
-        let v_D  = bind!("D",  int_cast!(substr2!(str_e.clone(), 9, 2)));
+        let v_Y = bind!("Y", int_cast!(substr2!(str_e.clone(), 1, 4)));
+        let v_M = bind!("M", int_cast!(substr2!(str_e.clone(), 6, 2)));
+        let v_D = bind!("D", int_cast!(substr2!(str_e.clone(), 9, 2)));
         let v_Yd = bind!("Yd", dec_cast!(v_Y.clone()));
         let v_Md = bind!("Md", dec_cast!(v_M.clone()));
         let v_Dd = bind!("Dd", dec_cast!(v_D.clone()));
 
         // ── Julian Day Number (JDN) ─────────────────────────────────────────
         // a = FLOOR((14 – Md) / 12)
-        let v_14mM    = bind!("14mM",    sub!(ddm!("14"), v_Md.clone()));
-        let v_jdn_a   = bind!("jdna",    floor_f!(div!(v_14mM, ddm!("12"))));
+        let v_14mM = bind!("14mM", sub!(ddm!("14"), v_Md.clone()));
+        let v_jdn_a = bind!("jdna", floor_f!(div!(v_14mM, ddm!("12"))));
         // y = Yd + 4800 – a
-        let v_jdn_y   = bind!("jdny",    sub!(add!(v_Yd.clone(), ddm!("4800")), v_jdn_a.clone()));
+        let v_jdn_y = bind!(
+            "jdny",
+            sub!(add!(v_Yd.clone(), ddm!("4800")), v_jdn_a.clone())
+        );
         // m = Md + 12*a – 3
-        let v_12a     = bind!("12a",     mul!(ddm!("12"), v_jdn_a.clone()));
-        let v_jdn_m   = bind!("jdnm",    sub!(add!(v_Md.clone(), v_12a), ddm!("3")));
+        let v_12a = bind!("12a", mul!(ddm!("12"), v_jdn_a.clone()));
+        let v_jdn_m = bind!("jdnm", sub!(add!(v_Md.clone(), v_12a), ddm!("3")));
         // FLOOR((153*m + 2) / 5)
-        let v_153m    = bind!("153m",    mul!(ddm!("153"), v_jdn_m));
-        let v_153m2   = bind!("153m2",   add!(v_153m, ddm!("2")));
+        let v_153m = bind!("153m", mul!(ddm!("153"), v_jdn_m));
+        let v_153m2 = bind!("153m2", add!(v_153m, ddm!("2")));
         let v_f153m25 = bind!("f153m25", floor_f!(div!(v_153m2, ddm!("5"))));
         // 365*y, FLOOR(y/4), FLOOR(y/100), FLOOR(y/400)
-        let v_365y    = bind!("365y",    mul!(ddm!("365"), v_jdn_y.clone()));
-        let v_y4      = bind!("y4",      floor_f!(div!(v_jdn_y.clone(), ddm!("4"))));
-        let v_y100    = bind!("y100",    floor_f!(div!(v_jdn_y.clone(), ddm!("100"))));
-        let v_y400    = bind!("y400",    floor_f!(div!(v_jdn_y.clone(), ddm!("400"))));
+        let v_365y = bind!("365y", mul!(ddm!("365"), v_jdn_y.clone()));
+        let v_y4 = bind!("y4", floor_f!(div!(v_jdn_y.clone(), ddm!("4"))));
+        let v_y100 = bind!("y100", floor_f!(div!(v_jdn_y.clone(), ddm!("100"))));
+        let v_y400 = bind!("y400", floor_f!(div!(v_jdn_y.clone(), ddm!("400"))));
         // JDN = D + f153m25 + 365y + y4 – y100 + y400 – 32045
         // Oxigraph right-assoc workaround: sum positives, sum negatives, then subtract.
-        let v_jdn_pos = bind!("JDNp", add!(add!(add!(add!(
-            v_Dd, v_f153m25), v_365y), v_y4), v_y400));
+        let v_jdn_pos = bind!(
+            "JDNp",
+            add!(add!(add!(add!(v_Dd, v_f153m25), v_365y), v_y4), v_y400)
+        );
         let v_jdn_neg = bind!("JDNn", add!(v_y100, ddm!("32045")));
-        let v_JDN     = bind!("JDN",  sub!(v_jdn_pos, v_jdn_neg));
+        let v_JDN = bind!("JDN", sub!(v_jdn_pos, v_jdn_neg));
 
         // ── JDN mod 7 (0 = Monday … 6 = Sunday) ────────────────────────────
-        let v_JDN7    = bind!("JDN7",  floor_f!(div!(v_JDN.clone(), ddm!("7"))));
-        let v_mod7    = bind!("mod7",  sub!(v_JDN.clone(), mul!(ddm!("7"), v_JDN7)));
+        let v_JDN7 = bind!("JDN7", floor_f!(div!(v_JDN.clone(), ddm!("7"))));
+        let v_mod7 = bind!("mod7", sub!(v_JDN.clone(), mul!(ddm!("7"), v_JDN7)));
 
         if prop == "weekDay" || prop == "dayOfWeek" {
             // ISO weekday: 1=Mon .. 7=Sun; int_cast wraps the Add ✓
@@ -5268,15 +5413,18 @@ impl Compiler {
         }
 
         // ── ordinalDay = JDN − JDN(Y, 1, 1) + 1 ─────────────────────────────
-        let v_y4799    = bind!("y4799",   add!(v_Yd.clone(), ddm!("4799")));
-        let v_365yj1   = bind!("365yj1",  mul!(ddm!("365"), v_y4799.clone()));
-        let v_yj1_4    = bind!("yj1_4",   floor_f!(div!(v_y4799.clone(), ddm!("4"))));
-        let v_yj1_100  = bind!("yj1_100", floor_f!(div!(v_y4799.clone(), ddm!("100"))));
-        let v_yj1_400  = bind!("yj1_400", floor_f!(div!(v_y4799, ddm!("400"))));
+        let v_y4799 = bind!("y4799", add!(v_Yd.clone(), ddm!("4799")));
+        let v_365yj1 = bind!("365yj1", mul!(ddm!("365"), v_y4799.clone()));
+        let v_yj1_4 = bind!("yj1_4", floor_f!(div!(v_y4799.clone(), ddm!("4"))));
+        let v_yj1_100 = bind!("yj1_100", floor_f!(div!(v_y4799.clone(), ddm!("100"))));
+        let v_yj1_400 = bind!("yj1_400", floor_f!(div!(v_y4799, ddm!("400"))));
         // JDN(Y,1,1): D=1, M=1 → a=1, y=Y+4799, m=10 → D + FLOOR((153*10+2)/5) = 1+306 = 307
-        let v_JDNj1_p  = bind!("JDNj1p", add!(add!(add!(ddm!("307"), v_365yj1), v_yj1_4), v_yj1_400));
-        let v_JDNj1_n  = bind!("JDNj1n", add!(v_yj1_100, ddm!("32045")));
-        let v_JDN_j1   = bind!("JDNj1",  sub!(v_JDNj1_p, v_JDNj1_n));
+        let v_JDNj1_p = bind!(
+            "JDNj1p",
+            add!(add!(add!(ddm!("307"), v_365yj1), v_yj1_4), v_yj1_400)
+        );
+        let v_JDNj1_n = bind!("JDNj1n", add!(v_yj1_100, ddm!("32045")));
+        let v_JDN_j1 = bind!("JDNj1", sub!(v_JDNj1_p, v_JDNj1_n));
 
         if prop == "ordinalDay" || prop == "dayOfYear" {
             let v_dj1 = bind!("dj1", sub!(v_JDN.clone(), v_JDN_j1));
@@ -5285,30 +5433,30 @@ impl Compiler {
 
         // ── ISO week / weekYear ───────────────────────────────────────────────
         // JDN of the Thursday of the same ISO week: thu_jdn = JDN + 3 – mod7
-        let v_thu_jdn  = bind!("thujdn", sub!(add!(v_JDN.clone(), ddm!("3")), v_mod7));
+        let v_thu_jdn = bind!("thujdn", sub!(add!(v_JDN.clone(), ddm!("3")), v_mod7));
 
         // Inverse JDN formula to recover thu_year (Gregorian proleptic year)
-        let v_inv_a    = bind!("inva",   add!(v_thu_jdn.clone(), ddm!("32044")));
-        let v_4a       = bind!("4a",     mul!(ddm!("4"), v_inv_a.clone()));
-        let v_4a3      = bind!("4a3",    add!(v_4a, ddm!("3")));
-        let v_inv_b    = bind!("invb",   floor_f!(div!(v_4a3, ddm!("146097"))));
-        let v_146097b  = bind!("146b",   mul!(ddm!("146097"), v_inv_b.clone()));
-        let v_146097b4 = bind!("146b4",  floor_f!(div!(v_146097b, ddm!("4"))));
-        let v_inv_c    = bind!("invc",   sub!(v_inv_a, v_146097b4));
-        let v_4c       = bind!("4c",     mul!(ddm!("4"), v_inv_c.clone()));
-        let v_4c3      = bind!("4c3",    add!(v_4c, ddm!("3")));
-        let v_inv_d    = bind!("invd",   floor_f!(div!(v_4c3, ddm!("1461"))));
-        let v_1461d    = bind!("1461d",  mul!(ddm!("1461"), v_inv_d.clone()));
-        let v_1461d4   = bind!("1461d4", floor_f!(div!(v_1461d, ddm!("4"))));
-        let v_inv_e    = bind!("inve",   sub!(v_inv_c, v_1461d4));
-        let v_5e       = bind!("5e",     mul!(ddm!("5"), v_inv_e));
-        let v_5e2      = bind!("5e2",    add!(v_5e, ddm!("2")));
-        let v_inv_m    = bind!("invm",   floor_f!(div!(v_5e2, ddm!("153"))));
-        let v_m10      = bind!("m10",    floor_f!(div!(v_inv_m, ddm!("10"))));
-        let v_100b     = bind!("100b",   mul!(ddm!("100"), v_inv_b));
+        let v_inv_a = bind!("inva", add!(v_thu_jdn.clone(), ddm!("32044")));
+        let v_4a = bind!("4a", mul!(ddm!("4"), v_inv_a.clone()));
+        let v_4a3 = bind!("4a3", add!(v_4a, ddm!("3")));
+        let v_inv_b = bind!("invb", floor_f!(div!(v_4a3, ddm!("146097"))));
+        let v_146097b = bind!("146b", mul!(ddm!("146097"), v_inv_b.clone()));
+        let v_146097b4 = bind!("146b4", floor_f!(div!(v_146097b, ddm!("4"))));
+        let v_inv_c = bind!("invc", sub!(v_inv_a, v_146097b4));
+        let v_4c = bind!("4c", mul!(ddm!("4"), v_inv_c.clone()));
+        let v_4c3 = bind!("4c3", add!(v_4c, ddm!("3")));
+        let v_inv_d = bind!("invd", floor_f!(div!(v_4c3, ddm!("1461"))));
+        let v_1461d = bind!("1461d", mul!(ddm!("1461"), v_inv_d.clone()));
+        let v_1461d4 = bind!("1461d4", floor_f!(div!(v_1461d, ddm!("4"))));
+        let v_inv_e = bind!("inve", sub!(v_inv_c, v_1461d4));
+        let v_5e = bind!("5e", mul!(ddm!("5"), v_inv_e));
+        let v_5e2 = bind!("5e2", add!(v_5e, ddm!("2")));
+        let v_inv_m = bind!("invm", floor_f!(div!(v_5e2, ddm!("153"))));
+        let v_m10 = bind!("m10", floor_f!(div!(v_inv_m, ddm!("10"))));
+        let v_100b = bind!("100b", mul!(ddm!("100"), v_inv_b));
         // thu_year = 100*b + d + FLOOR(m/10) – 4800
-        let v_tyr_p    = bind!("tyrp",   add!(add!(v_100b, v_inv_d), v_m10));
-        let v_thu_year = bind!("tyr",    sub!(v_tyr_p, ddm!("4800")));
+        let v_tyr_p = bind!("tyrp", add!(add!(v_100b, v_inv_d), v_m10));
+        let v_thu_year = bind!("tyr", sub!(v_tyr_p, ddm!("4800")));
 
         if prop == "weekYear" {
             return Some(int_cast!(v_thu_year));
@@ -5316,46 +5464,55 @@ impl Compiler {
 
         if prop == "week" {
             // JDN(thu_year, 1, 4): D=4, a=1, y=ty+4799, m=10 → 4+FLOOR((153*10+2)/5)=4+306=310
-            let v_ty4799   = bind!("ty4799",  add!(dec_cast!(v_thu_year), ddm!("4799")));
-            let v_365ty    = bind!("365ty",   mul!(ddm!("365"), v_ty4799.clone()));
-            let v_ty4      = bind!("ty4",     floor_f!(div!(v_ty4799.clone(), ddm!("4"))));
-            let v_ty100    = bind!("ty100",   floor_f!(div!(v_ty4799.clone(), ddm!("100"))));
-            let v_ty400    = bind!("ty400",   floor_f!(div!(v_ty4799, ddm!("400"))));
-            let v_JDNtj4_p = bind!("JDNtj4p", add!(add!(add!(ddm!("310"), v_365ty), v_ty4), v_ty400));
+            let v_ty4799 = bind!("ty4799", add!(dec_cast!(v_thu_year), ddm!("4799")));
+            let v_365ty = bind!("365ty", mul!(ddm!("365"), v_ty4799.clone()));
+            let v_ty4 = bind!("ty4", floor_f!(div!(v_ty4799.clone(), ddm!("4"))));
+            let v_ty100 = bind!("ty100", floor_f!(div!(v_ty4799.clone(), ddm!("100"))));
+            let v_ty400 = bind!("ty400", floor_f!(div!(v_ty4799, ddm!("400"))));
+            let v_JDNtj4_p = bind!(
+                "JDNtj4p",
+                add!(add!(add!(ddm!("310"), v_365ty), v_ty4), v_ty400)
+            );
             let v_JDNtj4_n = bind!("JDNtj4n", add!(v_ty100, ddm!("32045")));
-            let v_JDN_tj4  = bind!("JDNtj4",  sub!(v_JDNtj4_p, v_JDNtj4_n));
+            let v_JDN_tj4 = bind!("JDNtj4", sub!(v_JDNtj4_p, v_JDNtj4_n));
             // w1_mon = JDN_tj4 – (JDN_tj4 mod 7)  (Monday of ISO week 1)
-            let v_tj4_7    = bind!("tj47",  floor_f!(div!(v_JDN_tj4.clone(), ddm!("7"))));
-            let v_j4mod7   = bind!("j4m7",  sub!(v_JDN_tj4.clone(), mul!(ddm!("7"), v_tj4_7)));
-            let v_w1_mon   = bind!("w1mon", sub!(v_JDN_tj4, v_j4mod7));
-            let v_thu_w1   = bind!("thuw1", sub!(v_thu_jdn, v_w1_mon));
-            let v_wraw     = bind!("wraw",  floor_f!(div!(v_thu_w1, ddm!("7"))));
+            let v_tj4_7 = bind!("tj47", floor_f!(div!(v_JDN_tj4.clone(), ddm!("7"))));
+            let v_j4mod7 = bind!("j4m7", sub!(v_JDN_tj4.clone(), mul!(ddm!("7"), v_tj4_7)));
+            let v_w1_mon = bind!("w1mon", sub!(v_JDN_tj4, v_j4mod7));
+            let v_thu_w1 = bind!("thuw1", sub!(v_thu_jdn, v_w1_mon));
+            let v_wraw = bind!("wraw", floor_f!(div!(v_thu_w1, ddm!("7"))));
             return Some(int_cast!(add!(v_wraw, ddm!("1"))));
         }
 
         if prop == "dayOfQuarter" {
             // quarter start month: FLOOR((Md – 1) / 3) * 3 + 1
-            let v_m1   = bind!("m1",   sub!(v_Md.clone(), ddm!("1")));
-            let v_qm3  = bind!("qm3",  floor_f!(div!(v_m1, ddm!("3"))));
-            let v_qsm  = bind!("qsm",  add!(mul!(ddm!("3"), v_qm3), ddm!("1")));
+            let v_m1 = bind!("m1", sub!(v_Md.clone(), ddm!("1")));
+            let v_qm3 = bind!("qm3", floor_f!(div!(v_m1, ddm!("3"))));
+            let v_qsm = bind!("qsm", add!(mul!(ddm!("3"), v_qm3), ddm!("1")));
             // JDN(Y, qsm, 1)
-            let v_14qs  = bind!("14qs",  sub!(ddm!("14"), v_qsm.clone()));
-            let v_qs_a  = bind!("qsa",   floor_f!(div!(v_14qs, ddm!("12"))));
-            let v_qs_y  = bind!("qsy",   sub!(add!(v_Yd, ddm!("4800")), v_qs_a.clone()));
+            let v_14qs = bind!("14qs", sub!(ddm!("14"), v_qsm.clone()));
+            let v_qs_a = bind!("qsa", floor_f!(div!(v_14qs, ddm!("12"))));
+            let v_qs_y = bind!("qsy", sub!(add!(v_Yd, ddm!("4800")), v_qs_a.clone()));
             let v_12qsa = bind!("12qsa", mul!(ddm!("12"), v_qs_a));
-            let v_qs_m  = bind!("qsm2",  sub!(add!(v_qsm, v_12qsa), ddm!("3")));
+            let v_qs_m = bind!("qsm2", sub!(add!(v_qsm, v_12qsa), ddm!("3")));
             let v_153qm = bind!("153qm", mul!(ddm!("153"), v_qs_m));
             let v_153qm2 = bind!("153qm2", add!(v_153qm, ddm!("2")));
-            let v_f153q  = bind!("f153q", floor_f!(div!(v_153qm2, ddm!("5"))));
-            let v_365qy  = bind!("365qy", mul!(ddm!("365"), v_qs_y.clone()));
-            let v_qy4    = bind!("qy4",   floor_f!(div!(v_qs_y.clone(), ddm!("4"))));
-            let v_qy100  = bind!("qy100", floor_f!(div!(v_qs_y.clone(), ddm!("100"))));
-            let v_qy400  = bind!("qy400", floor_f!(div!(v_qs_y, ddm!("400"))));
+            let v_f153q = bind!("f153q", floor_f!(div!(v_153qm2, ddm!("5"))));
+            let v_365qy = bind!("365qy", mul!(ddm!("365"), v_qs_y.clone()));
+            let v_qy4 = bind!("qy4", floor_f!(div!(v_qs_y.clone(), ddm!("4"))));
+            let v_qy100 = bind!("qy100", floor_f!(div!(v_qs_y.clone(), ddm!("100"))));
+            let v_qy400 = bind!("qy400", floor_f!(div!(v_qs_y, ddm!("400"))));
             // JDN of quarter start (D=1): 1 + FLOOR((153*m+2)/5) → same as above but D=1
-            let v_JDNqs_p = bind!("JDNqsp", add!(add!(add!(add!(ddm!("1"), v_f153q), v_365qy), v_qy4), v_qy400));
+            let v_JDNqs_p = bind!(
+                "JDNqsp",
+                add!(
+                    add!(add!(add!(ddm!("1"), v_f153q), v_365qy), v_qy4),
+                    v_qy400
+                )
+            );
             let v_JDNqs_n = bind!("JDNqsn", add!(v_qy100, ddm!("32045")));
-            let v_JDN_qs  = bind!("JDNqs",  sub!(v_JDNqs_p, v_JDNqs_n));
-            let v_dqs     = bind!("dqs",    sub!(v_JDN, v_JDN_qs));
+            let v_JDN_qs = bind!("JDNqs", sub!(v_JDNqs_p, v_JDNqs_n));
+            let v_dqs = bind!("dqs", sub!(v_JDN, v_JDN_qs));
             return Some(int_cast!(add!(v_dqs, ddm!("1"))));
         }
 
@@ -5407,12 +5564,16 @@ fn const_eval_integer(expr: &Expr) -> Option<i64> {
         E::Mul(a, b) => const_eval_integer(a)?.checked_mul(const_eval_integer(b)?),
         E::Div(a, b) => {
             let denom = const_eval_integer(b)?;
-            if denom == 0 { return None; }
+            if denom == 0 {
+                return None;
+            }
             Some(const_eval_integer(a)? / denom)
         }
         E::Mod(a, b) => {
             let denom = const_eval_integer(b)?;
-            if denom == 0 { return None; }
+            if denom == 0 {
+                return None;
+            }
             Some(const_eval_integer(a)? % denom)
         }
         _ => None,
@@ -5440,12 +5601,16 @@ fn const_eval_numeric(expr: &Expr) -> Option<f64> {
             // Each operand is evaluated with its own type (integer-first semantics).
             // If one side is a float literal, the result is floating-point.
             let denom = const_eval_numeric(b)?;
-            if denom == 0.0 { return None; }
+            if denom == 0.0 {
+                return None;
+            }
             Some(const_eval_numeric(a)? / denom)
         }
         E::Mod(a, b) => {
             let denom = const_eval_numeric(b)?;
-            if denom == 0.0 { return None; }
+            if denom == 0.0 {
+                return None;
+            }
             Some(const_eval_numeric(a)? % denom)
         }
         E::Pow(a, b) => {
@@ -5981,10 +6146,7 @@ fn lqa_temporal_component_expr(component: &str, arg: SparExpr) -> Option<SparExp
     use spargebra::algebra::Expression as SE;
     let xsd_int = NamedNode::new_unchecked(XSD_INTEGER);
     let lit_int = |n: i64| -> SparExpr {
-        SparExpr::Literal(SparLit::new_typed_literal(
-            n.to_string(),
-            xsd_int.clone(),
-        ))
+        SparExpr::Literal(SparLit::new_typed_literal(n.to_string(), xsd_int.clone()))
     };
     let lit_flt = |n: f64| -> SparExpr {
         SparExpr::Literal(SparLit::new_typed_literal(
@@ -6002,10 +6164,7 @@ fn lqa_temporal_component_expr(component: &str, arg: SparExpr) -> Option<SparExp
             Box::new(SE::FunctionCall(
                 Function::Floor,
                 vec![SE::Divide(
-                    Box::new(SE::Subtract(
-                        Box::new(month_expr()),
-                        Box::new(lit_int(1)),
-                    )),
+                    Box::new(SE::Subtract(Box::new(month_expr()), Box::new(lit_int(1)))),
                     Box::new(lit_flt(3.0)),
                 )],
             )),
@@ -6043,10 +6202,7 @@ fn lqa_temporal_component_expr(component: &str, arg: SparExpr) -> Option<SparExp
                 Box::new(SE::Multiply(
                     Box::new(SE::FunctionCall(
                         Function::Floor,
-                        vec![SE::Divide(
-                            Box::new(ms_total),
-                            Box::new(lit_flt(1000.0)),
-                        )],
+                        vec![SE::Divide(Box::new(ms_total), Box::new(lit_flt(1000.0)))],
                     )),
                     Box::new(lit_flt(1000.0)),
                 )),
@@ -6067,26 +6223,24 @@ fn lqa_temporal_component_expr(component: &str, arg: SparExpr) -> Option<SparExp
 fn lqa_temporal_component_fn(component: &str, arg: SparExpr) -> Option<SparExpr> {
     use spargebra::algebra::Function;
 
-    let xsi_nn  = NamedNode::new_unchecked(XSD_INTEGER);
+    let xsi_nn = NamedNode::new_unchecked(XSD_INTEGER);
     let xsd_dec = NamedNode::new_unchecked("http://www.w3.org/2001/XMLSchema#decimal");
 
     let str_e = SparExpr::FunctionCall(Function::Str, vec![arg.clone()]);
 
-    let dim = |n: i64| SparExpr::Literal(SparLit::new_typed_literal(
-        n.to_string(), xsi_nn.clone()));
+    let dim = |n: i64| SparExpr::Literal(SparLit::new_typed_literal(n.to_string(), xsi_nn.clone()));
     let slit = |s: &str| SparExpr::Literal(SparLit::new_simple_literal(s.to_owned()));
-    let int_cast = |e: SparExpr| SparExpr::FunctionCall(
-        Function::Custom(xsi_nn.clone()), vec![e]);
-    let dec_cast = |e: SparExpr| SparExpr::FunctionCall(
-        Function::Custom(xsd_dec.clone()), vec![e]);
-    let substr2 = |s: SparExpr, start: i64, len: i64| SparExpr::FunctionCall(
-        Function::SubStr, vec![s, dim(start), dim(len)]);
-    let contains_f = |s: SparExpr, sub: &str| SparExpr::FunctionCall(
-        Function::Contains, vec![s, slit(sub)]);
-    let strafter_f = |s: SparExpr, delim: &str| SparExpr::FunctionCall(
-        Function::StrAfter, vec![s, slit(delim)]);
+    let int_cast = |e: SparExpr| SparExpr::FunctionCall(Function::Custom(xsi_nn.clone()), vec![e]);
+    let dec_cast = |e: SparExpr| SparExpr::FunctionCall(Function::Custom(xsd_dec.clone()), vec![e]);
+    let substr2 = |s: SparExpr, start: i64, len: i64| {
+        SparExpr::FunctionCall(Function::SubStr, vec![s, dim(start), dim(len)])
+    };
+    let contains_f =
+        |s: SparExpr, sub: &str| SparExpr::FunctionCall(Function::Contains, vec![s, slit(sub)]);
+    let strafter_f =
+        |s: SparExpr, delim: &str| SparExpr::FunctionCall(Function::StrAfter, vec![s, slit(delim)]);
     let floor_f = |e: SparExpr| SparExpr::FunctionCall(Function::Floor, vec![e]);
-    let ceil_f  = |e: SparExpr| SparExpr::FunctionCall(Function::Ceil,  vec![e]);
+    let ceil_f = |e: SparExpr| SparExpr::FunctionCall(Function::Ceil, vec![e]);
     let add = |a: SparExpr, b: SparExpr| SparExpr::Add(Box::new(a), Box::new(b));
     let sub = |a: SparExpr, b: SparExpr| SparExpr::Subtract(Box::new(a), Box::new(b));
     let mul = |a: SparExpr, b: SparExpr| SparExpr::Multiply(Box::new(a), Box::new(b));
@@ -6094,31 +6248,28 @@ fn lqa_temporal_component_fn(component: &str, arg: SparExpr) -> Option<SparExpr>
 
     // Time portion helper: IF(CONTAINS(str, "T"), STRAFTER(str, "T"), str).
     // Works for both "HH:MM:SS…" (time-only) and "YYYY-MM-DDTHH:MM:SS…" (datetime).
-    let time_str = || SparExpr::If(
-        Box::new(contains_f(str_e.clone(), "T")),
-        Box::new(strafter_f(str_e.clone(), "T")),
-        Box::new(str_e.clone()),
-    );
+    let time_str = || {
+        SparExpr::If(
+            Box::new(contains_f(str_e.clone(), "T")),
+            Box::new(strafter_f(str_e.clone(), "T")),
+            Box::new(str_e.clone()),
+        )
+    };
     let t_str = time_str();
 
     // Fractional-second helper: raw string after "."  in the time part.
     let frac_raw = strafter_f(t_str.clone(), ".");
     let frac9 = substr2(
-        SparExpr::FunctionCall(
-            Function::Concat,
-            vec![frac_raw, slit("000000000")],
-        ),
-        1, 9,
+        SparExpr::FunctionCall(Function::Concat, vec![frac_raw, slit("000000000")]),
+        1,
+        9,
     );
 
     match component {
         // ── Date components ─────────────────────────────────────────────────
-        "year" =>
-            Some(int_cast(substr2(str_e.clone(), 1, 4))),
-        "month" =>
-            Some(int_cast(substr2(str_e.clone(), 6, 2))),
-        "day" =>
-            Some(int_cast(substr2(str_e.clone(), 9, 2))),
+        "year" => Some(int_cast(substr2(str_e.clone(), 1, 4))),
+        "month" => Some(int_cast(substr2(str_e.clone(), 6, 2))),
+        "day" => Some(int_cast(substr2(str_e.clone(), 9, 2))),
         "quarter" | "quarterOfYear" => {
             // CEIL(DEC(month) / 3) — correct for all 12 months.
             // month 1-3 → 1, 4-6 → 2, 7-9 → 3, 10-12 → 4.
@@ -6130,23 +6281,20 @@ fn lqa_temporal_component_fn(component: &str, arg: SparExpr) -> Option<SparExpr>
             ))))
         }
         // ── Time components ─────────────────────────────────────────────────
-        "hour" =>
-            Some(int_cast(substr2(t_str.clone(), 1, 2))),
-        "minute" =>
-            Some(int_cast(substr2(t_str.clone(), 4, 2))),
-        "second" =>
-            Some(int_cast(substr2(t_str.clone(), 7, 2))),
-        "millisecond" | "millisecondOfSecond" | "millisecondsOfSecond" =>
-            Some(int_cast(substr2(frac9.clone(), 1, 3))),
-        "microsecond" | "microsecondOfSecond" | "microsecondsOfSecond" =>
-            Some(int_cast(substr2(frac9.clone(), 1, 6))),
-        "nanosecond" | "nanosecondOfSecond" | "nanosecondsOfSecond" =>
-            Some(int_cast(frac9)),
+        "hour" => Some(int_cast(substr2(t_str.clone(), 1, 2))),
+        "minute" => Some(int_cast(substr2(t_str.clone(), 4, 2))),
+        "second" => Some(int_cast(substr2(t_str.clone(), 7, 2))),
+        "millisecond" | "millisecondOfSecond" | "millisecondsOfSecond" => {
+            Some(int_cast(substr2(frac9.clone(), 1, 3)))
+        }
+        "microsecond" | "microsecondOfSecond" | "microsecondsOfSecond" => {
+            Some(int_cast(substr2(frac9.clone(), 1, 6)))
+        }
+        "nanosecond" | "nanosecondOfSecond" | "nanosecondsOfSecond" => Some(int_cast(frac9)),
         // ── Timezone ────────────────────────────────────────────────────────
         // TZ() works on typed xsd:dateTime; for plain strings we'd need string
         // extraction. Accept TZ() for now — timezone tests use typed literals.
-        "timezone" | "offset" =>
-            Some(SparExpr::FunctionCall(Function::Tz, vec![arg])),
+        "timezone" | "offset" => Some(SparExpr::FunctionCall(Function::Tz, vec![arg])),
         // ── Arithmetic-based exotic components ──────────────────────────────
         other => lqa_temporal_component_expr(other, arg),
     }
@@ -6241,8 +6389,8 @@ fn lqa_scalar_temporal_prop(val: &str, component: &str) -> Option<SparExpr> {
             let d = comps.day?;
             // temporal_epoch returns absolute day count from year 1; subtract Unix epoch offset.
             const UNIX_EPOCH_DAY: i64 = 719163; // temporal_epoch(1970, 1, 1)
-            let epoch_days = crate::translator::cypher::temporal_epoch(y, mo, d) as i64
-                - UNIX_EPOCH_DAY;
+            let epoch_days =
+                crate::translator::cypher::temporal_epoch(y, mo, d) as i64 - UNIX_EPOCH_DAY;
             let h = comps.hour.unwrap_or(0);
             let mi = comps.minute.unwrap_or(0);
             let s = comps.second.unwrap_or(0);
@@ -6254,8 +6402,8 @@ fn lqa_scalar_temporal_prop(val: &str, component: &str) -> Option<SparExpr> {
             let mo = comps.month?;
             let d = comps.day?;
             const UNIX_EPOCH_DAY: i64 = 719163; // temporal_epoch(1970, 1, 1)
-            let epoch_days = crate::translator::cypher::temporal_epoch(y, mo, d) as i64
-                - UNIX_EPOCH_DAY;
+            let epoch_days =
+                crate::translator::cypher::temporal_epoch(y, mo, d) as i64 - UNIX_EPOCH_DAY;
             let h = comps.hour.unwrap_or(0);
             let mi = comps.minute.unwrap_or(0);
             let s = comps.second.unwrap_or(0);
@@ -6291,7 +6439,10 @@ fn lqa_expr_contains_null(e: &Expr) -> bool {
 fn lqa_serialize_literal(e: &Expr) -> Option<String> {
     match e {
         Expr::List(items) => {
-            let parts: Vec<String> = items.iter().map(lqa_serialize_literal).collect::<Option<_>>()?;
+            let parts: Vec<String> = items
+                .iter()
+                .map(lqa_serialize_literal)
+                .collect::<Option<_>>()?;
             Some(format!("[{}]", parts.join(", ")))
         }
         Expr::Map(pairs) => {
