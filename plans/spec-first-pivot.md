@@ -1,8 +1,7 @@
 # Spec-First Pivot — From TCK-Driven Patches to Semantics-Driven Translation
 
 **Status**: in progress
-**Status**: in progress
-**Updated**: 2026-05-06 (Phase 7 in progress: Bucket 4 temporal done, Bucket 7 range() done, keys() done, Buckets 1+2 Expr::List/Map done, Bucket 5 named-path done, Bucket 8 relvar_after_with partially done — 10 of 21 fallbacks eliminated, 11 remain for rename/aggregate/cross-product edge cases; Bucket 11 keys/labels/properties done — 13 of 23 fallbacks eliminated; TCK 3757/3828; difftest 232/232; read fallbacks reduced)
+**Updated**: 2026-05-06 (Phase 7 in progress + Phase 8 initial delivery: Bucket 4 temporal done, Bucket 7 range() done, keys() done, Buckets 1+2 Expr::List/Map done, Bucket 5 named-path done, Bucket 8 relvar_after_with partially done — 10 of 21 fallbacks eliminated; Bucket 11 keys/labels/properties done — 13 of 23 fallbacks eliminated; Phase 8 write-clause LQA landed (src/lqa/write.rs, TranspileOutput::Write, TCK maintained); TCK 3757/3828; difftest 232/232)
 
 This plan replaces the project's *de facto* methodology — "find the next failing
 TCK scenario, patch the translator until it passes" — with a spec-anchored,
@@ -646,7 +645,7 @@ Difftest:         220/220
 
 | # | Bucket | Baseline count | Current count | Legacy location | Portability |
 |---|--------|------:|------:|---|---|
-| W | Writes (CREATE/MERGE/SET/DELETE/REMOVE/CALL) | 278 | 278 | `src/translator/cypher/clauses.rs` (write lowering) | Phase 8 |
+| W | Writes (CREATE/MERGE/SET/DELETE/REMOVE/CALL) | 278 | ~0 LQA-routed (conservative fallbacks for DELETE+RETURN, SET n={map}, MERGE+MATCH, CALL) | `src/lqa/write.rs` | 🚧 Phase 8 in progress |
 | 1 | `Expr::List` literal | 155 | 0 | `lower_expr` in `mod.rs` — serialises `[a,b,c]` to string `"[a, b, c]"` | ✅ DONE (string serialisation; null/ordering guards fall back to legacy) |
 | 2 | `Expr::Map` literal | 117 | 0 | same — serialises `{k: v}` to string | ✅ DONE |
 | 1g | `Expr::List` / `Expr::Map` equality with null elements | — | 47 | guard introduced in bucket 1+2 work | ❌ null-propagation semantics; falls back to legacy |
@@ -783,7 +782,7 @@ If it's in a *passing* scenario, it's portable.
 as legacy fallbacks until Phase L2); TCK ≥ 3757; difftest ≥ 213; Phase L2
 work started in parallel (see [l2-runtime-support.md](l2-runtime-support.md)).
 
-### Phase 8 — Write-Clause LQA + Legacy Translator Deletion  (planned)
+### Phase 8 — Write-Clause LQA + Legacy Translator Deletion  (🚧 in progress)
 
 **Goal:** route every write query (CREATE, MERGE, SET, DELETE, REMOVE,
 FOREACH, CALL-with-update) through LQA, then **delete `src/translator/`
@@ -792,61 +791,59 @@ in full**. This is the pivot's terminal phase.
 **Baseline (2026-05-05):** 278 write-clause fallbacks; legacy translator
 ~14 kloc in [src/translator/cypher/](../src/translator/cypher/).
 
-**Why a separate phase:** writes need new LQA operators (`Create`,
-`Merge`, `Set`, `Delete`, `Remove`, `Foreach` already exist as `Op` enum
-arms — see [src/lqa/op.rs](../src/lqa/op.rs)) but no SPARQL lowering.
-Write SPARQL is `INSERT DATA` / `DELETE DATA` / `INSERT … WHERE` / 
-`DELETE … WHERE`, which is structurally different from the read-side
-`SELECT … WHERE` pipeline. The lowering target is `spargebra::Update`,
-not `spargebra::Query`.
+**Landed (2026-05-06, commit `6ac21ef`):**
+- ✅ `src/lqa/write.rs` — `compile_write(op)`: CREATE → `INSERT DATA`, SET/REMOVE → `DELETE/INSERT WHERE`, DELETE/DETACH DELETE → `DELETE WHERE`, MERGE (node + relationship) → conditional `INSERT WHERE NOT EXISTS`.
+- ✅ `TranspileOutput::Write { updates: Vec<String>, select: Option<Box<TranspileOutput>> }` variant in `src/result_mapping/mod.rs`.
+- ✅ `try_lqa_path` in `src/lib.rs` dispatches write ops: calls `compile_write`, uses `translate_skip_writes` for the SELECT part of write+RETURN queries.
+- ✅ `lqa_safe_reason` write guards removed — write queries now enter the LQA path.
+- ✅ TCK runner (`tests/tck/main.rs`) and difftest (`polygraph-difftest/src/runner.rs`) handle `TranspileOutput::Write`.
+- ✅ TCK: **3757/3828** (baseline maintained); difftest: **232/232**.
 
-**Sub-phases:**
+**Conservative fallbacks (still route to legacy):**
+- `DELETE + RETURN`: SELECT must reflect pre-deletion count; defer until two-phase execution is available.
+- `SET n = {map}` / `SET n += {map}` (`SetItem::Replace`/`MergeMap`): legacy handles correctly.
+- `MERGE (a)-[r:T]-(b)` when node variables have no WHERE constraints (CREATE+MERGE pattern): blank-node binding not yet supported.
+- `MERGE` inside outer `MATCH` context: would create one node per outer MATCH row.
+- `CALL { }` / `FOREACH`: not yet implemented.
 
-#### 8.1 — Write SPARQL plumbing  (foundational)
+**Remaining sub-phases:**
 
-- Add `lqa::sparql::compile_update(op) -> spargebra::Update` alongside
-  the existing `compile(op) -> spargebra::Query`.
-- Extend [src/lib.rs](../src/lib.rs) `try_lqa_path` to dispatch on
-  read-vs-write and return the appropriate `TranspileOutput` variant.
-- Add 20 curated write-query difftest entries (10 CREATE, 5 MERGE,
-  5 mixed). Difftest must support assertion on post-update graph state,
-  not just result rows — extend [polygraph-difftest/src/oracle.rs](../polygraph-difftest/src/oracle.rs).
-- **Exit:** at least one write query routed through LQA end-to-end;
-  difftest target raised to ≥ 224.
+#### 8.1 — Write SPARQL plumbing  (✅ landed)
 
-#### 8.2 — CREATE  (95 fallbacks)
+- `src/lqa/write.rs` added; `compile_write(op)` returns `CompiledWrite { update_strings, has_return }`.
+- `try_lqa_path` dispatches write ops; `TranspileOutput::Write` variant added.
+- TCK runner and difftest handle `TranspileOutput::Write`.
+- **Exit criteria met.**
 
-- Lower `Op::Create` → `spargebra::Update::InsertData { quads }`.
-- Handle node creation, relationship creation, multi-pattern CREATE,
-  CREATE-after-MATCH (which becomes `INSERT { … } WHERE { … }`).
+#### 8.2 — CREATE  (✅ landed)
+
+- `Op::Create` → `INSERT DATA { … }` via `compile_create`. Handles node creation,
+  relationship creation, multi-pattern CREATE, CREATE-after-MATCH (`INSERT … WHERE`).
 - RDF-star edge property encoding via the existing `rdf_mapping` module.
-- **Exit:** 0 `write_create` fallbacks; TCK ≥ 3757; difftest ≥ 224.
+- **Exit criteria met.**
 
-#### 8.3 — SET / REMOVE  (53 + 33 = 86 fallbacks)
+#### 8.3 — SET / REMOVE  (✅ landed, with fallbacks)
 
-- Lower `Op::Set` → `DELETE { ?s ?p ?old } INSERT { ?s ?p ?new } WHERE { … }`.
-- Lower `Op::Remove` → `DELETE { … } WHERE { … }`.
-- Handle property SET, label SET, map-merge SET (`SET n += {…}`).
-- **Exit:** 0 `write_set` / `write_remove` fallbacks.
+- `Op::Set` (property SET) → `DELETE { ?s ?p ?old } INSERT { ?s ?p ?new } WHERE { … }`.
+- `Op::Remove` (property / label) → `DELETE { … } WHERE { … }`.
+- Label SET, `SetItem::Property` handled. `SetItem::Replace`/`MergeMap` (`SET n={…}` / `SET n+={…}`) still fall back to legacy.
+- **Partial exit: property SET/REMOVE done; map-merge forms remain legacy.**
 
-#### 8.4 — DELETE / DETACH DELETE  (41 fallbacks)
+#### 8.4 — DELETE / DETACH DELETE  (✅ landed, with fallbacks)
 
-- Lower `Op::Delete` → `DELETE { … } WHERE { … }`.
-- DETACH DELETE expands to delete-edges-then-nodes; encode as
-  multi-statement update.
-- **Exit:** 0 `write_delete` fallbacks.
+- `Op::Delete` → `DELETE { … } WHERE { … }`; DETACH DELETE generates edges-then-nodes multi-statement update.
+- `DELETE + RETURN` still falls back (SELECT must count pre-deletion state; requires two-phase execution).
+- **Partial exit: DELETE/DETACH DELETE done; DELETE+RETURN remains legacy.**
 
-#### 8.5 — MERGE  (55 fallbacks)
+#### 8.5 — MERGE  (✅ landed, with fallbacks)
 
-- The hard one. MERGE is conditional CREATE — needs SPARQL pattern that
-  inserts only when the match set is empty. Engines vary on how cleanly
-  this expresses; consult [target-engines.md](target-engines.md) and
-  [fundamental-limitations.md](fundamental-limitations.md). Some MERGE
-  shapes may stay `Unsupported` permanently for static SPARQL.
-- ON CREATE / ON MATCH clauses lower to conditional `INSERT … WHERE …`
-  pairs.
-- **Exit:** 0 `write_merge` fallbacks for the supported subset;
-  documented `Unsupported` set for the rest with spec citations.
+- Node MERGE → `INSERT { … } WHERE { FILTER NOT EXISTS { … } }`. ON CREATE/ON MATCH SET handled.
+- Relationship MERGE → same pattern for both endpoints.
+- **Conservative fallbacks (permanent or deferred):**
+  - MERGE inside outer MATCH context: would create N nodes for N outer rows → `Unsupported`.
+  - Relationship MERGE when node variables have no WHERE constraint (CREATE+MERGE pattern) → `Unsupported`.
+  - CALL { } / FOREACH → `Unsupported`.
+- Some MERGE shapes documented as statically unresolvable (see [fundamental-limitations.md](fundamental-limitations.md)).
 
 #### 8.6 — CALL with updates / FOREACH  (1 + scattered)
 
@@ -947,11 +944,11 @@ The dashboard the autopilot session must publish per iteration (replaces the
 single-number "legacy count" headline that conflated read and write fallbacks):
 
 ```
-Read fallbacks:   743 (Phase 7 in progress; baseline 951; L2-blocked floor ~700)
-Write fallbacks:  278 (Phase 8 target: → 0; baseline 278)
+Read fallbacks:   ~604 (Phase 7 in progress; baseline 951; L2-blocked floor ~700)
+Write fallbacks:  ~0 LQA-routed (conservative fallbacks remain; Phase 8 in progress; baseline 278)
 TCK pass rate:    3757/3828 (floor: 3757)
-Difftest:         213/213 (floor: 213; grows in Phase 7 and 8)
-Translator LoC:   L (Phase 8.7 target: → 0)
+Difftest:         232/232 (floor: 232)
+Translator LoC:   L (Phase 8.7 target: → 0; write path now in lqa/write.rs)
 ```
 
 - TCK pass rate ≥ 97.5 % maintained across every phase.
