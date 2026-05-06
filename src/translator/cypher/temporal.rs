@@ -297,6 +297,14 @@ fn tc_tz_suffix_month(tz: &str, month: i64) -> String {
 /// Precise DST-aware timezone suffix using year/month/day to determine the exact DST boundary.
 /// Uses last-Sunday-of-March / last-Sunday-of-October rule for European timezones.
 pub(crate) fn tc_tz_suffix_ymd(tz: &str, y: i64, m: i64, d: i64) -> String {
+    tc_tz_suffix_ymdh(tz, y, m, d, 12) // default to noon (avoids transition boundary)
+}
+
+/// Precise DST-aware timezone suffix using year/month/day/hour to determine the exact DST
+/// boundary.  On the DST transition day, uses the hour to resolve the ambiguity:
+/// - Spring (last Sunday of March): clocks advance at 2 AM local → before 2 = winter, ≥2 = summer
+/// - Fall  (last Sunday of Oct/Sep): clocks fall back at 3 AM summer → before 3 = summer, ≥3 = winter
+pub(crate) fn tc_tz_suffix_ymdh(tz: &str, y: i64, m: i64, d: i64, h: i64) -> String {
     if tz == "Z" || tz.starts_with('+') || tz.starts_with('-') {
         if tz != "Z" && tz.len() == 9 && tz.as_bytes().get(6) == Some(&b':') && tz.ends_with(":00")
         {
@@ -305,7 +313,7 @@ pub(crate) fn tc_tz_suffix_ymd(tz: &str, y: i64, m: i64, d: i64) -> String {
         return tz.to_string();
     }
     let (winter, summer) = tc_tz_winter_summer(tz);
-    let is_summer = tc_is_eu_dst(tz, y, m, d);
+    let is_summer = tc_is_eu_dst_h(tz, y, m, d, h);
     let offset = if is_summer { summer } else { winter };
     if offset == "Z" {
         format!("Z[{}]", tz)
@@ -360,6 +368,41 @@ fn tc_is_eu_dst(tz: &str, y: i64, m: i64, d: i64) -> bool {
         d >= last_sun // spring forward: from last Sunday of March onward
     } else {
         d < last_sun // fall back: before last Sunday of fall_month
+    }
+}
+
+/// Hour-aware EU DST check.  Identical to [`tc_is_eu_dst`] except that on the
+/// exact transition day it uses the local wall-clock hour to resolve the
+/// ambiguity around the clock change:
+/// - Spring (last Sunday of March): advance at **2 AM** local → h < 2 = winter, h ≥ 2 = summer
+/// - Fall   (last Sunday of Oct/Sep): fall back at **3 AM** summer → h < 3 = summer, h ≥ 3 = winter
+fn tc_is_eu_dst_h(tz: &str, y: i64, m: i64, d: i64, h: i64) -> bool {
+    match tz {
+        "Europe/Stockholm" | "Europe/Paris" | "Europe/Berlin" | "Europe/Rome" | "Europe/Madrid"
+        | "Europe/Amsterdam" | "Europe/Brussels" | "Europe/Copenhagen" | "Europe/Warsaw"
+        | "Europe/Vienna" | "Europe/Zurich" | "Europe/Prague" | "Europe/Budapest"
+        | "Europe/London" | "Europe/Dublin" | "Europe/Lisbon" => {}
+        _ => return false,
+    }
+    let fall_month: i64 = if y >= 1996 { 10 } else { 9 };
+    if m > 3 && m < fall_month {
+        return true;
+    }
+    if m < 3 || m > fall_month {
+        return false;
+    }
+    let last_sun = tc_last_sunday_of_month(y, m);
+    if m == 3 {
+        if d < last_sun { return false; }
+        if d > last_sun { return true; }
+        // On the transition day: clocks spring forward at 2 AM local.
+        h >= 2
+    } else {
+        // fall_month
+        if d < last_sun { return true; }
+        if d > last_sun { return false; }
+        // On the transition day: clocks fall back at 3 AM local (summer time).
+        h < 3
     }
 }
 
@@ -1654,12 +1697,17 @@ pub(crate) fn temporal_datetime_from_map(pairs: &[(String, Expression)]) -> Opti
         }
     };
     let override_tz_str = temporal_get_s(pairs, "timezone").map(|s| {
-        // Use precise DST calculation from the full date (year, month, day).
+        // Use precise DST calculation from the full date (year, month, day) and
+        // the hour (if provided), so that the DST boundary on the transition day
+        // is resolved correctly (e.g. Oct 29 00:00 = summer, 04:00 = winter).
         let dp: Vec<&str> = date_part.splitn(3, '-').collect();
         let y: i64 = dp.get(0).and_then(|s| s.parse().ok()).unwrap_or(0);
         let m: i64 = dp.get(1).and_then(|s| s.parse().ok()).unwrap_or(month);
         let d: i64 = dp.get(2).and_then(|s| s.parse().ok()).unwrap_or(1);
-        tc_tz_suffix_ymd(&s, y, m, d)
+        // Peek at the hour override (if any) for hour-aware DST.  Use noon
+        // as the default so that non-transition days are unaffected.
+        let h: i64 = temporal_get_i(pairs, "hour").unwrap_or(12);
+        tc_tz_suffix_ymdh(&s, y, m, d, h)
     });
     if let Some((bh, bmin, bsec, bns, ref base_tz_raw, orig_had_tz)) = base_time_data {
         let override_h = temporal_get_i(pairs, "hour");
@@ -3681,17 +3729,64 @@ pub(crate) fn temporal_duration_in_days(lhs: &str, rhs: &str) -> Option<String> 
 pub(crate) fn temporal_duration_in_seconds(lhs: &str, rhs: &str) -> Option<String> {
     let l = temporal_to_val(lhs)?;
     let r = temporal_to_val(rhs)?;
-    let use_utc = l.has_tz && r.has_tz;
-    let l_t = if l.has_time {
-        tempo_time(&l, use_utc)
+
+    // When one operand has a named timezone and the other is timezone-unaware
+    // (localdatetime, localtime, or date), the TZ-unaware operand is treated
+    // as being in the same named timezone.  The UTC offset for the TZ-unaware
+    // operand is determined by the DST rule at its own date/time, which on a
+    // DST transition day depends on the hour (e.g. Oct 29 00:00 = summer,
+    // 04:00 = winter).  Both are then compared as UTC instants.
+    let (l_t, r_t) = if l.has_tz && r.has_tz {
+        // Both have explicit TZ: compare as UTC instants.
+        (l.utc_time_ns, r.utc_time_ns)
+    } else if l.has_tz && !r.has_tz {
+        // Only lhs has TZ.  Apply lhs's named timezone to rhs.
+        let named_tz = extract_named_tz(lhs);
+        if !named_tz.is_empty() {
+            // For rhs with no date, use lhs's date as context.
+            let (ry, rm, rd) = if r.has_date {
+                (r.year, r.month, r.day)
+            } else {
+                (l.year, l.month, l.day)
+            };
+            let r_hour = if r.has_time {
+                ((r.local_time_ns / 3_600_000_000_000).abs()) as i64
+            } else {
+                0i64 // midnight
+            };
+            let r_off_s = parse_tz_offset_s(&tc_tz_suffix_ymdh(named_tz, ry, rm, rd, r_hour))
+                .unwrap_or(0);
+            let r_utc = r.local_time_ns - r_off_s as i128 * 1_000_000_000;
+            (l.utc_time_ns, r_utc)
+        } else {
+            (l.local_time_ns, r.local_time_ns)
+        }
+    } else if !l.has_tz && r.has_tz {
+        // Only rhs has TZ.  Apply rhs's named timezone to lhs.
+        let named_tz = extract_named_tz(rhs);
+        if !named_tz.is_empty() {
+            let (ly, lm, ld) = if l.has_date {
+                (l.year, l.month, l.day)
+            } else {
+                (r.year, r.month, r.day)
+            };
+            let l_hour = if l.has_time {
+                ((l.local_time_ns / 3_600_000_000_000).abs()) as i64
+            } else {
+                0i64 // midnight
+            };
+            let l_off_s = parse_tz_offset_s(&tc_tz_suffix_ymdh(named_tz, ly, lm, ld, l_hour))
+                .unwrap_or(0);
+            let l_utc = l.local_time_ns - l_off_s as i128 * 1_000_000_000;
+            (l_utc, r.utc_time_ns)
+        } else {
+            (l.local_time_ns, r.local_time_ns)
+        }
     } else {
-        0
+        // Neither has TZ: compare as wall-clock times.
+        (l.local_time_ns, r.local_time_ns)
     };
-    let r_t = if r.has_time {
-        tempo_time(&r, use_utc)
-    } else {
-        0
-    };
+
     let l_epoch_ns = if l.has_date && r.has_date {
         temporal_epoch(l.year, l.month, l.day) as i128 * DAY_NS
     } else {
@@ -3708,6 +3803,19 @@ pub(crate) fn temporal_duration_in_seconds(lhs: &str, rhs: &str) -> Option<Strin
     }
     let (h, min, s) = split_ns_to_hms(total_diff);
     Some(dur_fmt(0, 0, 0, h, min, s))
+}
+
+/// Extract the named timezone identifier from a datetime string such as
+/// `"2017-10-29T00:00+02:00[Europe/Stockholm]"` → `"Europe/Stockholm"`.
+/// Returns an empty string if there is no `[...]` suffix.
+fn extract_named_tz(s: &str) -> &str {
+    if let Some(open) = s.rfind('[') {
+        let rest = &s[open + 1..];
+        if let Some(close) = rest.find(']') {
+            return &rest[..close];
+        }
+    }
+    ""
 }
 
 // ── Epoch conversion ──────────────────────────────────────────────────────────
