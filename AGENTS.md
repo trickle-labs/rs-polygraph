@@ -15,6 +15,7 @@ See [ROADMAP.md](ROADMAP.md) for phased delivery. Design documents live in `plan
 | [target-engines.md](plans/target-engines.md) | reference | SPARQL engine capability analysis (`TargetEngine` trait) |
 | [spec-first-pivot.md](plans/spec-first-pivot.md) | in progress | Active: spec-anchored LQA + differential testing pivot (v0.6.0) |
 | [release.md](plans/release.md) | planned | CI workflows, crates.io publishing, docs.rs, GitHub Pages (v0.7.0) |
+| [write-clause-api.md](plans/write-clause-api.md) | planned | Promote write-clause transpilation to public API; Neo4j getting-started tutorial on Oxigraph (v0.7.1) |
 | [result-mapping.md](plans/result-mapping.md) | planned | SPARQL results → openCypher values hydration API (v0.8.0) |
 | [l2-runtime-support.md](plans/l2-runtime-support.md) | planned | Multi-phase (L2) runtime API; `TranspileOutput::Continuation` design (v0.8.1) |
 | [parser-extraction.md](plans/parser-extraction.md) | planned | Extract parser/AST into standalone `opencypher-parser` crate (v0.9.0) |
