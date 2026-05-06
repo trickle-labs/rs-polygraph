@@ -1,0 +1,17 @@
+name = "labels_null_node"
+description = "labels(null) and labels(nullable node that didn't match) return null."
+spec_ref = "openCypher 9 §6.4.2 labels()"
+
+cypher = """
+OPTIONAL MATCH (n:DoesNotExist)
+RETURN labels(n) AS a, labels(null) AS b
+"""
+
+[fixture]
+nodes = []
+edges = []
+
+[expected]
+columns = ["a", "b"]
+rows = [["__null__", "__null__"]]
+order = "bag"

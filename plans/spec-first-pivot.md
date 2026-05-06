@@ -2,7 +2,7 @@
 
 **Status**: in progress
 **Status**: in progress
-**Updated**: 2026-05-06 (Phase 7 in progress: Bucket 4 temporal done, Bucket 7 range() done, keys() done, Buckets 1+2 Expr::List/Map done, Bucket 5 named-path done, Bucket 8 relvar_after_with partially done — 10 of 21 fallbacks eliminated, 11 remain for rename/aggregate/cross-product edge cases; TCK 3757/3828; difftest 226/226; read fallbacks reduced)
+**Updated**: 2026-05-06 (Phase 7 in progress: Bucket 4 temporal done, Bucket 7 range() done, keys() done, Buckets 1+2 Expr::List/Map done, Bucket 5 named-path done, Bucket 8 relvar_after_with partially done — 10 of 21 fallbacks eliminated, 11 remain for rename/aggregate/cross-product edge cases; Bucket 11 keys/labels/properties done — 13 of 23 fallbacks eliminated; TCK 3757/3828; difftest 232/232; read fallbacks reduced)
 
 This plan replaces the project's *de facto* methodology — "find the next failing
 TCK scenario, patch the translator until it passes" — with a spec-anchored,
@@ -661,7 +661,7 @@ Difftest:         220/220
 | 8 | `relvar_after_with` / varlen named relvar / unbounded varlen unlabeled | 41 | 41 | `is_lqa_safe` guards | ✅ portable for relvar_after_with (port leg. treatment); `unbounded_varlen_unlabeled` (9) in failing set → keep guard |
 | 9 | `ListComprehension` / `PatternComprehension` / `ListSlice` | 40 | 62 | `mod.rs` lower_expr branches | ⏳ **DEFERRED to Phase L2** — requires runtime list iteration; correlated sub-SELECT hack would be overwritten by L2 |
 | 10 | `Quantifier over non-constant list` | 24 | 48 | — | ❌ genuinely not portable: these 24 map to failing TCK scenarios; leave `Unsupported` — increased for same reason |
-| 11 | `keys()` / `properties()` / `labels()` | 20 | 22 | `mod.rs` function dispatch | ✅ UNWIND keys(n/r) + IN keys(n) DONE (−1 expr fallback); Map3 list returns blocked |
+| 11 | `keys()` / `properties()` / `labels()` | 20 | 10 | `mod.rs` function dispatch | ✅ PARTIAL (−13): Map literal, null, nullable handled; GROUP BY subquery for labels(scan_var); 2+3+5 remain for node/rel/path/non-scan-var cases |
 | 12 | scalar-var property access, `Exists`, `type(r)`, `rand()`, `^`, `Subscript`, `with_orderby_shadow_alias`, misc | 42 | 57 | various | mostly portable; check legacy per-item |
 
 **Progress log:**
@@ -675,6 +675,7 @@ Difftest:         220/220
 | 2026-05-05 | 5 — named path (fixed-hop) | ~43 LQA-routed | removed `named_path` guard; added `named_path_varlen` + `named_path_with_real_agg` guards; `count(p)→COUNT(*)`, `nodes(p)→CONCAT`, `RETURN p→Err`; 3 difftest queries added |
 | 2026-05-05 | 1+2 — Expr::List + Expr::Map | −59 net | String serialisation ported; null/ordering/dynamic-concat guards added; 4 difftest queries added (224 total) |
 | 2026-05-06 | 8 — relvar_after_with (partial) | 0 net TCK (all 21 were already passing via legacy) | `lower_expand_relvar_reuse` added; `live_rel_vars` tracking in `is_lqa_safe` enables safe identity-passthrough reuse; 10 of 21 fallbacks eliminated; 2 difftest queries added (226 total); 11 rename/aggregate/cross-product cases kept in legacy |
+| 2026-05-06 | 11 — keys/properties/labels (partial) | 0 net TCK (all were already passing via legacy) | keys(Map), keys(null/nullable), labels(scan_var→GROUP BY subquery), labels(null/nullable), properties(Map), properties(null/nullable) implemented in LQA; −13 fallbacks (keys: 10→2, labels: 6→3, props: 7→5); 6 difftest queries added (232 total); path/non-scan var cases remain in legacy |
 
 **Ordered queue (next-up first):**
 
@@ -690,8 +691,10 @@ Permanent constructs only — L2-deferred buckets (3, 6, 9) are NOT in this queu
    ~~(12) and `unbounded_varlen_unlabeled` (9) sub-buckets keep their guards.~~
 4. **Bucket 7 remainder — `range()` with non-literal args** (26). Port whatever
    the legacy translator emits; this is a pure arithmetic lowering, not list-dependent.
-5. **Bucket 11 — `keys()`, `properties()`, `labels()`** (22). Port from
-   `mod.rs` function dispatch (only the forms not involving runtime list materialization).
+   NOTE: adding const-int vars tracking exposes LQA list-comparison bugs — route safely.
+5. ~~**Bucket 11 — `keys()`, `properties()`, `labels()`** (22). Port from~~
+   ~~`mod.rs` function dispatch (only the forms not involving runtime list materialization).~~
+   ~~DONE: −13 fallbacks; remaining 10 (node/rel/path/non-scan-var) stay in legacy.~~
 6. **Bucket 12 — long tail** (57). Port individually; check each item against the
    L2 classification before porting — skip any that require runtime list access.
 7. **Bucket 10 — `Quantifier` over non-constant list** (48). In the failing set;

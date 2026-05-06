@@ -1,0 +1,17 @@
+name = "keys_null"
+description = "keys(null) and keys(null-bound variable) return null."
+spec_ref = "openCypher 9 §6.4.1 keys()"
+
+cypher = """
+WITH null AS m
+RETURN keys(m) AS a, keys(null) AS b
+"""
+
+[fixture]
+nodes = []
+edges = []
+
+[expected]
+columns = ["a", "b"]
+rows = [["__null__", "__null__"]]
+order = "bag"

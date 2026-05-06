@@ -1,0 +1,17 @@
+name = "range_with_const_var"
+description = "range() with variable args that are bound to compile-time integer constants via WITH."
+spec_ref = "openCypher 9 §6.3.3 range()"
+
+cypher = """
+WITH 1 AS start, 4 AS stop
+RETURN range(start, stop) AS list
+"""
+
+[fixture]
+nodes = []
+edges = []
+
+[expected]
+columns = ["list"]
+rows = [["[1, 2, 3, 4]"]]
+order = "bag"

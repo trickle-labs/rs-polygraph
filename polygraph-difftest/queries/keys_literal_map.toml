@@ -1,0 +1,16 @@
+name = "keys_literal_map"
+description = "keys() on a literal map returns the list of key strings."
+spec_ref = "openCypher 9 §6.4.1 keys()"
+
+cypher = """
+RETURN keys({name: 'Alice', age: 38}) AS k
+"""
+
+[fixture]
+nodes = []
+edges = []
+
+[expected]
+columns = ["k"]
+rows = [["['name', 'age']"]]
+order = "bag"

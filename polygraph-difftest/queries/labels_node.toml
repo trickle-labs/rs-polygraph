@@ -1,0 +1,19 @@
+name = "labels_node"
+description = "labels(n) returns a list of label strings for a MATCH-bound node."
+spec_ref = "openCypher 9 §6.4.2 labels()"
+
+cypher = """
+MATCH (n)
+RETURN labels(n) AS l
+"""
+
+[fixture]
+nodes = [
+    { id = "a", labels = ["Person"], properties = {} },
+]
+edges = []
+
+[expected]
+columns = ["l"]
+rows = [["['Person']"]]
+order = "bag"

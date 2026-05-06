@@ -179,6 +179,17 @@ struct Compiler {
     /// Used to implement `nodes(p)` → the sequence of node IRIs along the path.
     /// Populated in the Op::Expand handler alongside `path_lengths`.
     path_node_vars: HashMap<String, Vec<Variable>>,
+    /// Variables in the current scope that are known at compile time to hold
+    /// a specific integer value.  Populated by Op::Projection when a projection
+    /// item is a bare integer literal (e.g. `WITH 0 AS start`), a pass-through
+    /// of an already-known const-int var, or `size(known_list)`.
+    /// Consumed by `eval_range_args` to enable `range(start, end)` where start/end
+    /// are bound to compile-time constants.
+    const_int_vars: HashMap<String, i64>,
+    /// Known literal list lengths for `size(var)` const-folding.
+    /// Maps variable name → list element count (populated when `WITH list AS v`
+    /// assigns a plain list literal, or `UNWIND` of a sized literal list).
+    list_size_vars: HashMap<String, usize>,
 }
 
 impl Compiler {
@@ -204,6 +215,8 @@ impl Compiler {
             scalar_lit_vals: HashMap::new(),
             path_lengths: HashMap::new(),
             path_node_vars: HashMap::new(),
+            const_int_vars: HashMap::new(),
+            list_size_vars: HashMap::new(),
         }
     }
 
@@ -215,6 +228,47 @@ impl Compiler {
 
     fn var(name: &str) -> Variable {
         Variable::new_unchecked(name)
+    }
+
+    /// Serialize an LQA map literal to the Cypher string form `{key: value, ...}`.
+    /// Used for `properties({...})` compile-time serialization.
+    fn serialize_map_literal(pairs: &[(String, crate::lqa::expr::Expr)]) -> String {
+        use crate::lqa::expr::{Expr as E, Literal as ELit};
+        fn ser(e: &E) -> String {
+            match e {
+                E::Literal(ELit::Integer(n)) => n.to_string(),
+                E::Literal(ELit::Float(f)) => {
+                    // Match legacy cypher_float_str output (no trailing .0 stripping here;
+                    // use the same format as Display for f64).
+                    format!("{f}")
+                }
+                E::Literal(ELit::String(s)) => format!("'{s}'"),
+                E::Literal(ELit::Boolean(b)) => b.to_string(),
+                E::Literal(ELit::Null) => "null".to_string(),
+                E::List(items) => {
+                    let inner: Vec<String> = items.iter().map(ser).collect();
+                    format!("[{}]", inner.join(", "))
+                }
+                E::Map(inner_pairs) => {
+                    let entries: Vec<String> = inner_pairs.iter()
+                        .map(|(k, v)| format!("{k}: {}", ser(v)))
+                        .collect();
+                    format!("{{{}}}", entries.join(", "))
+                }
+                E::Unary(crate::lqa::expr::UnaryOp::Neg, inner) => {
+                    match inner.as_ref() {
+                        E::Literal(ELit::Integer(n)) => format!("-{n}"),
+                        E::Literal(ELit::Float(f)) => format!("{}", -f),
+                        _ => "?".to_string(),
+                    }
+                }
+                _ => "?".to_string(),
+            }
+        }
+        let entries: Vec<String> = pairs.iter()
+            .map(|(k, v)| format!("{k}: {}", ser(v)))
+            .collect();
+        format!("{{{}}}", entries.join(", "))
     }
 
     // ── IRI helpers ───────────────────────────────────────────────────────────
@@ -864,6 +918,10 @@ impl Compiler {
                     }
                 }
                 let sparql_expr = self.lower_expr(&pi.expr)?;
+                // Const-int tracking: propagate compile-time integer bindings so that
+                // range(const_var, ...) can be evaluated at compile time (like legacy's
+                // const_int_vars mechanism).
+                self.update_const_int_vars(&pi.alias, &pi.expr);
                 // Flush required and optional pending triples BEFORE wrapping in
                 // Extend, so that OPTIONAL { } blocks appear BEFORE the BIND and
                 // the bound variables are in scope when BIND executes.
@@ -895,6 +953,122 @@ impl Compiler {
             }
             Ok((extended, vec![]))
         }
+    }
+
+    /// Populate `const_int_vars` and `list_size_vars` from a projection item.
+    /// Called after each non-GroupBy projection item to allow subsequent
+    /// `range(const_var, ...)` calls to const-evaluate their arguments.
+    fn update_const_int_vars(&mut self, alias: &str, expr: &crate::lqa::expr::Expr) {
+        use crate::lqa::expr::{Expr as E, Literal};
+        match expr {
+            E::Literal(Literal::Integer(n)) => {
+                self.const_int_vars.insert(alias.to_string(), *n);
+            }
+            E::Unary(crate::lqa::expr::UnaryOp::Neg, inner) => {
+                if let E::Literal(Literal::Integer(n)) = inner.as_ref() {
+                    self.const_int_vars.insert(alias.to_string(), -n);
+                }
+            }
+            E::Variable { name, .. } => {
+                // Passthrough alias: var retains const-int status if known.
+                if let Some(n) = self.const_int_vars.get(name.as_str()).copied() {
+                    self.const_int_vars.insert(alias.to_string(), n);
+                }
+                // Also propagate list-size status.
+                if let Some(sz) = self.list_size_vars.get(name.as_str()).copied() {
+                    self.list_size_vars.insert(alias.to_string(), sz);
+                }
+            }
+            E::FunctionCall { name, args, .. } if name.eq_ignore_ascii_case("size") => {
+                // size(literal_list_var) → const int
+                if let Some(arg) = args.first() {
+                    let sz_opt: Option<usize> = match arg {
+                        E::List(items) => Some(items.len()),
+                        E::Variable { name: v, .. } => self.list_size_vars.get(v.as_str()).copied(),
+                        _ => None,
+                    };
+                    if let Some(sz) = sz_opt {
+                        self.const_int_vars.insert(alias.to_string(), sz as i64);
+                    }
+                }
+            }
+            E::List(items) => {
+                // Track list literals so `size(var)` can be const-evaluated later.
+                self.list_size_vars.insert(alias.to_string(), items.len());
+            }
+            // Arithmetic over known const ints (e.g. `numOfValues - 1`).
+            E::Sub(a, b) => {
+                if let (Some(va), Some(vb)) = (self.eval_const_int(a), self.eval_const_int(b)) {
+                    if let Some(result) = va.checked_sub(vb) {
+                        self.const_int_vars.insert(alias.to_string(), result);
+                    }
+                }
+            }
+            E::Add(a, b) => {
+                if let (Some(va), Some(vb)) = (self.eval_const_int(a), self.eval_const_int(b)) {
+                    if let Some(result) = va.checked_add(vb) {
+                        self.const_int_vars.insert(alias.to_string(), result);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Evaluate an expression to a compile-time integer using the Compiler's
+    /// `const_int_vars` map in addition to the pure structural evaluator.
+    fn eval_const_int(&self, expr: &crate::lqa::expr::Expr) -> Option<i64> {
+        use crate::lqa::expr::{Expr as E, Literal};
+        match expr {
+            E::Literal(Literal::Integer(n)) => Some(*n),
+            E::Unary(crate::lqa::expr::UnaryOp::Neg, e) => self.eval_const_int(e)?.checked_neg(),
+            E::Unary(crate::lqa::expr::UnaryOp::Pos, e) => self.eval_const_int(e),
+            E::Variable { name, .. } => self.const_int_vars.get(name.as_str()).copied(),
+            E::Sub(a, b) => self.eval_const_int(a)?.checked_sub(self.eval_const_int(b)?),
+            E::Add(a, b) => self.eval_const_int(a)?.checked_add(self.eval_const_int(b)?),
+            E::Mul(a, b) => self.eval_const_int(a)?.checked_mul(self.eval_const_int(b)?),
+            E::Div(a, b) => {
+                let denom = self.eval_const_int(b)?;
+                if denom == 0 {
+                    return None;
+                }
+                Some(self.eval_const_int(a)? / denom)
+            }
+            E::Mod(a, b) => {
+                let denom = self.eval_const_int(b)?;
+                if denom == 0 {
+                    return None;
+                }
+                Some(self.eval_const_int(a)? % denom)
+            }
+            _ => None,
+        }
+    }
+
+    /// Evaluate range() args against both structural const-eval and the Compiler's
+    /// `const_int_vars` map.  Returns `None` if any arg is non-constant.
+    fn eval_range_args(&self, args: &[crate::lqa::expr::Expr]) -> Option<Vec<i64>> {
+        let start = self.eval_const_int(args.first()?)?;
+        let end_val = self.eval_const_int(args.get(1)?)?;
+        let step: i64 = if let Some(step_arg) = args.get(2) {
+            let s = self.eval_const_int(step_arg)?;
+            if s == 0 {
+                return None; // step=0 is invalid; let legacy raise the error
+            }
+            s
+        } else {
+            1
+        };
+        let mut items = Vec::new();
+        let mut i = start;
+        while (step > 0 && i <= end_val) || (step < 0 && i >= end_val) {
+            items.push(i);
+            i += step;
+            if items.len() > 100_000 {
+                return None; // too large; let legacy handle
+            }
+        }
+        Some(items)
     }
 
     fn lower_agg_item(
@@ -4389,8 +4563,8 @@ impl Compiler {
             }
             // ── range() builtin ───────────────────────────────────────────
             // range(start, end [, step]) → list of integers.
-            // When bounds are constant integers, expand to a serialized list
-            // string "[s, s+1, …, e]" matching the legacy translator's output.
+            // When bounds are constant integers (or compile-time const vars),
+            // expand to a serialized list string "[s, s+1, …, e]".
             "range" => {
                 if let Some(items) = eval_range_to_integers(args) {
                     let parts: Vec<String> = items.iter().map(|n| n.to_string()).collect();
@@ -4403,13 +4577,177 @@ impl Compiler {
                     reason: "range() with non-literal arguments requires legacy path".into(),
                 })
             }
+            // ── keys() ────────────────────────────────────────────────────────────
+            // keys({k: v, ...}) → compile-time list of key strings
+            // keys(null) | keys(nullable_var) → null
+            "keys" => {
+                let arg = args.first().ok_or_else(|| PolygraphError::Unsupported {
+                    construct: "keys()".into(),
+                    spec_ref: "openCypher 9 §6.3.5".into(),
+                    reason: "keys() requires an argument".into(),
+                })?;
+                match arg {
+                    Expr::Map(pairs) => {
+                        let key_list: Vec<String> = pairs.iter().map(|(k, _)| format!("'{k}'")).collect();
+                        Ok(SparExpr::Literal(SparLit::new_simple_literal(
+                            format!("[{}]", key_list.join(", ")),
+                        )))
+                    }
+                    Expr::Literal(crate::lqa::expr::Literal::Null) => {
+                        Ok(SparExpr::Variable(self.fresh("_null")))
+                    }
+                    Expr::Variable { name: vname, .. } if self.nullable.contains(vname.as_str()) => {
+                        Ok(SparExpr::Variable(self.fresh("_null")))
+                    }
+                    _ => Err(PolygraphError::Unsupported {
+                        construct: "keys()".into(),
+                        spec_ref: "openCypher 9 §6.3.5".into(),
+                        reason: "keys() on non-literal map requires legacy path".into(),
+                    }),
+                }
+            }
+            // ── labels() ──────────────────────────────────────────────────────────
+            // labels(null) | labels(nullable_var) → null
+            // labels(node_var) → GROUP BY subquery collecting rdf:type values
+            "labels" => {
+                let arg = args.first().ok_or_else(|| PolygraphError::Unsupported {
+                    construct: "labels()".into(),
+                    spec_ref: "openCypher 9 §6.3.5".into(),
+                    reason: "labels() requires an argument".into(),
+                })?;
+                match arg {
+                    Expr::Literal(crate::lqa::expr::Literal::Null) => {
+                        Ok(SparExpr::Variable(self.fresh("_null")))
+                    }
+                    Expr::Variable { name: vname, .. } if self.nullable.contains(vname.as_str()) => {
+                        Ok(SparExpr::Variable(self.fresh("_null")))
+                    }
+                    Expr::Variable { name: vname, .. } => {
+                        // Only handle scan_vars (MATCH-bound graph nodes).
+                        // Variables that are path names, relationship variables, computed
+                        // aliases, or anything not from a graph scan must fall back to
+                        // legacy so that the correct SyntaxError/TypeError is raised.
+                        if !self.scan_vars.contains(vname.as_str()) {
+                            return Err(PolygraphError::Unsupported {
+                                construct: "labels()".into(),
+                                spec_ref: "openCypher 9 §6.3.5".into(),
+                                reason: format!(
+                                    "labels({vname}) on non-scan-var requires legacy path \
+                                     (may be a path variable or relationship variable)"
+                                ),
+                            });
+                        }
+                        let n_var = Self::var(vname);
+                        let ltype_var = self.fresh(&format!("_ltype_{vname}"));
+                        let gc_var = self.fresh(&format!("_labels_gc_{vname}"));
+                        let base = self.base_iri.clone();
+                        let base_len = base.len();
+                        // Inner: ?n rdf:type ?_ltype . FILTER(STRSTARTS(STR(?_ltype), base))
+                        let inner_bgp = GraphPattern::Bgp {
+                            patterns: vec![TriplePattern {
+                                subject: TermPattern::Variable(n_var.clone()),
+                                predicate: NamedNodePattern::NamedNode(NamedNode::new_unchecked(RDF_TYPE)),
+                                object: TermPattern::Variable(ltype_var.clone()),
+                            }],
+                        };
+                        let filter_expr = SparExpr::FunctionCall(
+                            Function::StrStarts,
+                            vec![
+                                SparExpr::FunctionCall(Function::Str, vec![SparExpr::Variable(ltype_var.clone())]),
+                                SparExpr::Literal(SparLit::new_simple_literal(base)),
+                            ],
+                        );
+                        let inner_filtered = GraphPattern::Filter {
+                            expr: filter_expr,
+                            inner: Box::new(inner_bgp),
+                        };
+                        // Label name: SUBSTR(STR(?_ltype), base_len + 1)
+                        let label_name_expr = SparExpr::FunctionCall(
+                            Function::SubStr,
+                            vec![
+                                SparExpr::FunctionCall(Function::Str, vec![SparExpr::Variable(ltype_var.clone())]),
+                                SparExpr::Literal(SparLit::new_typed_literal(
+                                    (base_len + 1).to_string(),
+                                    NamedNode::new_unchecked(XSD_INTEGER),
+                                )),
+                            ],
+                        );
+                        // Quoted: CONCAT("'", label_name, "'")
+                        let quoted_label = SparExpr::FunctionCall(
+                            Function::Concat,
+                            vec![
+                                SparExpr::Literal(SparLit::new_simple_literal("'")),
+                                label_name_expr,
+                                SparExpr::Literal(SparLit::new_simple_literal("'")),
+                            ],
+                        );
+                        let gc_agg = AggregateExpression::FunctionCall {
+                            name: AggregateFunction::GroupConcat {
+                                separator: Some(", ".into()),
+                            },
+                            expr: quoted_label,
+                            distinct: true,
+                        };
+                        let group_pattern = GraphPattern::Group {
+                            inner: Box::new(inner_filtered),
+                            variables: vec![n_var],
+                            aggregates: vec![(gc_var.clone(), gc_agg)],
+                        };
+                        self.pending_optional_patterns.push(group_pattern);
+                        // Result: IF(BOUND(?gc), CONCAT("[", ?gc, "]"), "[]")
+                        Ok(SparExpr::If(
+                            Box::new(SparExpr::Bound(gc_var.clone())),
+                            Box::new(SparExpr::FunctionCall(
+                                Function::Concat,
+                                vec![
+                                    SparExpr::Literal(SparLit::new_simple_literal("[")),
+                                    SparExpr::Variable(gc_var),
+                                    SparExpr::Literal(SparLit::new_simple_literal("]")),
+                                ],
+                            )),
+                            Box::new(SparExpr::Literal(SparLit::new_simple_literal("[]"))),
+                        ))
+                    }
+                    _ => Err(PolygraphError::Unsupported {
+                        construct: "labels()".into(),
+                        spec_ref: "openCypher 9 §6.3.5".into(),
+                        reason: "labels() on non-variable argument requires legacy path".into(),
+                    }),
+                }
+            }
+            // ── properties() ──────────────────────────────────────────────────────
+            // properties(null) | properties(nullable_var) → null
+            // properties({k: v, ...}) → serialized map string
+            "properties" => {
+                let arg = args.first().ok_or_else(|| PolygraphError::Unsupported {
+                    construct: "properties()".into(),
+                    spec_ref: "openCypher 9 §6.3.5".into(),
+                    reason: "properties() requires an argument".into(),
+                })?;
+                match arg {
+                    Expr::Literal(crate::lqa::expr::Literal::Null) => {
+                        Ok(SparExpr::Variable(self.fresh("_null")))
+                    }
+                    Expr::Map(pairs) => {
+                        let serialized = Self::serialize_map_literal(pairs);
+                        Ok(SparExpr::Literal(SparLit::new_simple_literal(serialized)))
+                    }
+                    Expr::Variable { name: vname, .. } if self.nullable.contains(vname.as_str()) => {
+                        Ok(SparExpr::Variable(self.fresh("_null")))
+                    }
+                    _ => Err(PolygraphError::Unsupported {
+                        construct: "properties()".into(),
+                        spec_ref: "openCypher 9 §6.3.5".into(),
+                        reason: "properties() on node/relationship requires legacy path".into(),
+                    }),
+                }
+            }
             // Known openCypher functions that are valid but not yet implemented in the
             // LQA SPARQL path — fall through to legacy rather than raising a hard error.
             "datetime.truncate" | "localdatetime.truncate" | "date.truncate"
             | "time.truncate" | "localtime.truncate"
             | "duration.between" | "duration.inmonths" | "duration.indays"
             | "duration.inseconds" | "datetime.fromepoch" | "datetime.fromepochmillis"
-            | "keys" | "properties" | "labels"
             | "sin" | "cos" | "tan" | "asin" | "acos" | "atan" | "atan2" | "cot"
             | "degrees" | "radians" | "haversin" | "log" | "log10" | "e" | "pi"
             | "reduce" | "any" | "all" | "none" | "single"

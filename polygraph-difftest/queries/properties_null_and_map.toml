@@ -1,0 +1,16 @@
+name = "properties_null_and_map"
+description = "properties(null) returns null; properties({map}) returns the map serialized."
+spec_ref = "openCypher 9 §6.5.3 properties()"
+
+cypher = """
+RETURN properties(null) AS a, properties({name: 'Alice', age: 38}) AS b
+"""
+
+[fixture]
+nodes = []
+edges = []
+
+[expected]
+columns = ["a", "b"]
+rows = [["__null__", "{name: 'Alice', age: 38}"]]
+order = "bag"
