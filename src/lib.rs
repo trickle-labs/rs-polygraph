@@ -7,6 +7,7 @@ pub mod lqa;
 pub mod parser;
 pub mod rdf_mapping;
 pub mod result_mapping;
+pub mod runtime;
 pub mod sparql_engine;
 pub mod translator;
 

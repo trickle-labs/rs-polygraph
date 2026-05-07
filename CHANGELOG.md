@@ -3,6 +3,28 @@
 All notable changes to `polygraph` are documented here.  
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.8.1] — 2025-08-01 — L2 runtime driver
+
+### Added
+- **`polygraph::runtime`** module — synchronous L2 runtime driver for
+  multi-phase (Continuation) transpilation outputs.
+  - **`SparqlExecutor` trait** — minimal contract for callers to supply a
+    SPARQL SELECT executor; bridges any engine to the continuation driver.
+  - **`drive(output, executor)`** — recursively drives a `TranspileOutput`
+    chain to completion.  `Complete` → execute once; `Continuation` →
+    execute phase 1, pass rows to the closure, drive phase 2 recursively.
+    `Write` → returns `Err` (use `cypher_to_sparql_update` instead).
+- **3 unit tests** in `runtime` module verifying: single-phase execution,
+  two-phase continuation chaining, and correct error on Write outputs.
+
+### Context
+`TranspileOutput::Continuation` was already in the public API (v0.8.0).
+This release completes the L2 infrastructure by adding the runtime driver
+that callers need to execute continuation chains.  Specific Cypher constructs
+that produce `Continuation` outputs (UNWIND of runtime lists, list
+comprehensions over graph objects, quantifiers on collected lists) will be
+wired up in subsequent patch releases as individual L2 fixes.
+
 ## [0.8.0] — 2025-08-01 — Result hydration API
 
 ### Added
