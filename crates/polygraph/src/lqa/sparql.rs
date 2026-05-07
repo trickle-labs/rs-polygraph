@@ -2360,13 +2360,12 @@ impl Compiler {
                                 }
                                 _ => {}
                             }
-                            // Store literal list items for compile-time slice/subscript.
+                            // Store list items for compile-time subscript/slice resolution.
                             // e.g. `WITH [1,2,3] AS list RETURN list[1..2]`
+                            // Also stores mixed lists like `[r, 1]` so type(list[0]) can resolve.
                             if let Expr::List(items) = &pi.expr {
-                                if items.iter().all(lqa_is_full_literal) {
-                                    self.scalar_list_exprs
-                                        .insert(pi.alias.clone(), items.clone());
-                                }
+                                self.scalar_list_exprs
+                                    .insert(pi.alias.clone(), items.clone());
                             }
                             // Track temporal-typed variables for date/time arithmetic.
                             if let Expr::Literal(Literal::TypedLiteral(_, xsd_type)) = &pi.expr {
@@ -3746,6 +3745,38 @@ impl Compiler {
             }
 
             Expr::Property(base, key) => {
+                // Subscript resolution: (list[i]).key where list is in scalar_list_exprs.
+                // Resolve `list[i]` to the Cypher AST item BEFORE lowering, so that the
+                // resolved item (e.g. a relationship variable) is then processed by the
+                // appropriate path below (edge reification, node scan, etc.).
+                if let Expr::Subscript(list_base, idx) = base.as_ref() {
+                    if let Expr::Variable { name: list_name, .. } = list_base.as_ref() {
+                        if let Some(items) =
+                            self.scalar_list_exprs.get(list_name.as_str()).cloned()
+                        {
+                            let idx_val = lqa_eval_int_expr(idx.as_ref()).or_else(|| {
+                                if let Expr::Variable { name, .. } = idx.as_ref() {
+                                    self.const_int_vars.get(name.as_str()).copied()
+                                } else {
+                                    None
+                                }
+                            });
+                            if let Some(idx_i) = idx_val {
+                                let len = items.len() as i64;
+                                let i = if idx_i < 0 { len + idx_i } else { idx_i };
+                                if i >= 0 && (i as usize) < items.len() {
+                                    let resolved = items[i as usize].clone();
+                                    return self.lower_expr(&Expr::Property(
+                                        Box::new(resolved),
+                                        key.clone(),
+                                    ));
+                                }
+                                let null_var = self.fresh("null");
+                                return Ok(SparExpr::Variable(null_var));
+                            }
+                        }
+                    }
+                }
                 // Constant-fold: literal temporal value accessed via property key.
                 // This handles e.g. `date({year: 1984}).year` where the date constructor
                 // was folded to a TypedLiteral at lower time.
@@ -4790,6 +4821,13 @@ impl Compiler {
                     Expr::List(items) if items.iter().all(lqa_is_full_literal) => items.clone(),
                     Expr::Variable { name, .. } => {
                         if let Some(items) = self.scalar_list_exprs.get(name.as_str()).cloned() {
+                            if !items.iter().all(lqa_is_full_literal) {
+                                return Err(PolygraphError::Unsupported {
+                                    construct: "expression type ListSlice in LQA SPARQL lowering".into(),
+                                    spec_ref: "openCypher 9 §6".into(),
+                                    reason: "list slice on mixed-variable list requires legacy path".into(),
+                                });
+                            }
                             items
                         } else {
                             return Err(PolygraphError::Unsupported {
@@ -5273,6 +5311,33 @@ impl Compiler {
                                 "type() applied to node variable '{rv}'; expected a relationship"
                             ),
                         });
+                    }
+                }
+                // Subscript resolution: type(list[i]) where list is in scalar_list_exprs.
+                // e.g. `WITH [r, 1] AS list RETURN type(list[0])` → type(r)
+                if let Some(Expr::Subscript(list_base, idx)) = args.first() {
+                    if let Expr::Variable { name: list_name, .. } = list_base.as_ref() {
+                        if let Some(items) =
+                            self.scalar_list_exprs.get(list_name.as_str()).cloned()
+                        {
+                            let idx_val = lqa_eval_int_expr(idx.as_ref()).or_else(|| {
+                                if let Expr::Variable { name, .. } = idx.as_ref() {
+                                    self.const_int_vars.get(name.as_str()).copied()
+                                } else {
+                                    None
+                                }
+                            });
+                            if let Some(idx_i) = idx_val {
+                                let len = items.len() as i64;
+                                let i = if idx_i < 0 { len + idx_i } else { idx_i };
+                                if i >= 0 && (i as usize) < items.len() {
+                                    let resolved = items[i as usize].clone();
+                                    return self.lower_function_call(name, &[resolved]);
+                                }
+                                // Out of bounds → null; type(null) → null
+                                return Ok(SparExpr::Variable(self.fresh("_type_null")));
+                            }
+                        }
                     }
                 }
                 Err(PolygraphError::Unsupported {
@@ -5905,11 +5970,68 @@ impl Compiler {
                             Box::new(SparExpr::Literal(SparLit::new_simple_literal("[]"))),
                         ))
                     }
-                    _ => Err(PolygraphError::Unsupported {
-                        construct: "labels()".into(),
-                        spec_ref: "openCypher 9 §6.3.5".into(),
-                        reason: "labels() on non-variable argument requires legacy path".into(),
-                    }),
+                    _ => {
+                        // Subscript resolution: labels(list[i]) where list is in
+                        // scalar_list_exprs.  e.g. `WITH [a, 1] AS list RETURN
+                        // labels(list[0])` → labels(a) where a is a scan_var.
+                        if let Expr::Subscript(list_base, idx) = arg {
+                            if let Expr::Variable { name: list_name, .. } = list_base.as_ref() {
+                                if let Some(items) =
+                                    self.scalar_list_exprs.get(list_name.as_str()).cloned()
+                                {
+                                    let idx_val =
+                                        lqa_eval_int_expr(idx.as_ref()).or_else(|| {
+                                            if let Expr::Variable { name, .. } = idx.as_ref() {
+                                                self.const_int_vars.get(name.as_str()).copied()
+                                            } else {
+                                                None
+                                            }
+                                        });
+                                    if let Some(idx_i) = idx_val {
+                                        let len = items.len() as i64;
+                                        let i = if idx_i < 0 { len + idx_i } else { idx_i };
+                                        if i >= 0 && (i as usize) < items.len() {
+                                            let resolved = items[i as usize].clone();
+                                            // If the resolved item is a variable that was
+                                            // originally a node var (MATCH-bound), scan_vars
+                                            // may have been cleared by the WITH clause.
+                                            // Re-add it if it's not an edge or scalar var.
+                                            if let Expr::Variable {
+                                                name: ref resolved_name,
+                                                ..
+                                            } = resolved
+                                            {
+                                                if !self
+                                                    .scan_vars
+                                                    .contains(resolved_name.as_str())
+                                                    && !self
+                                                        .edge_vars
+                                                        .contains_key(resolved_name.as_str())
+                                                    && !self
+                                                        .scalar_vars
+                                                        .contains(resolved_name.as_str())
+                                                {
+                                                    self.scan_vars.insert(resolved_name.clone());
+                                                }
+                                            }
+                                            return self
+                                                .lower_function_call("labels", &[resolved]);
+                                        }
+                                        // Out of bounds → null; labels(null) → null
+                                        return Ok(SparExpr::Variable(
+                                            self.fresh("_labels_null"),
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                        Err(PolygraphError::Unsupported {
+                            construct: "labels()".into(),
+                            spec_ref: "openCypher 9 §6.3.5".into(),
+                            reason: "labels() on non-variable argument requires legacy path"
+                                .into(),
+                        })
+                    }
                 }
             }
             // ── properties() ──────────────────────────────────────────────────────
@@ -7009,6 +7131,10 @@ fn lqa_temporal_component_fn(component: &str, arg: SparExpr) -> Option<SparExpr>
         |s: SparExpr, sub: &str| SparExpr::FunctionCall(Function::Contains, vec![s, slit(sub)]);
     let strafter_f =
         |s: SparExpr, delim: &str| SparExpr::FunctionCall(Function::StrAfter, vec![s, slit(delim)]);
+    let strbefore_f =
+        |s: SparExpr, delim: &str| SparExpr::FunctionCall(Function::StrBefore, vec![s, slit(delim)]);
+    let strends_f =
+        |s: SparExpr, end: &str| SparExpr::FunctionCall(Function::StrEnds, vec![s, slit(end)]);
     let _floor_f = |e: SparExpr| SparExpr::FunctionCall(Function::Floor, vec![e]);
     let ceil_f = |e: SparExpr| SparExpr::FunctionCall(Function::Ceil, vec![e]);
     let _add = |a: SparExpr, b: SparExpr| SparExpr::Add(Box::new(a), Box::new(b));
@@ -7064,7 +7190,140 @@ fn lqa_temporal_component_fn(component: &str, arg: SparExpr) -> Option<SparExpr>
         // ── Timezone ────────────────────────────────────────────────────────
         // TZ() works on typed xsd:dateTime; for plain strings we'd need string
         // extraction. Accept TZ() for now — timezone tests use typed literals.
-        "timezone" | "offset" => Some(SparExpr::FunctionCall(Function::Tz, vec![arg])),
+        // ── Timezone / offset components ────────────────────────────────────
+        // These are extracted from the temporal string representation.
+        // Format: "HH:MM:SS[.ns][+|-HH:MM]" or "YYYY-MM-DDTHH:MM:SS[.ns][+|-HH:MM][TZ_NAME]"
+        "timezone" => {
+            // Return timezone name if present "[TZNAME]", else return offset string.
+            let t = time_str();
+            // Strip named timezone: base_t = STRBEFORE(t, "[") if CONTAINS(t, "["), else t
+            let base_t = SparExpr::If(
+                Box::new(contains_f(t.clone(), "[")),
+                Box::new(strbefore_f(t.clone(), "[")),
+                Box::new(t.clone()),
+            );
+            let has_tz_name = contains_f(t.clone(), "[");
+            // Extract "TZNAME" from "[TZNAME]": STRAFTER(STRBEFORE(t, "]"), "[")
+            let tz_name = strafter_f(strbefore_f(t.clone(), "]"), "[");
+            // Build offset string for non-named-tz case
+            let ends_z = strends_f(base_t.clone(), "Z");
+            let has_plus = contains_f(base_t.clone(), "+");
+            let offset_str = SparExpr::If(
+                Box::new(ends_z),
+                Box::new(slit("Z")),
+                Box::new(SparExpr::If(
+                    Box::new(has_plus.clone()),
+                    Box::new(SparExpr::FunctionCall(
+                        Function::Concat,
+                        vec![slit("+"), strafter_f(base_t.clone(), "+")],
+                    )),
+                    Box::new(SparExpr::FunctionCall(
+                        Function::Concat,
+                        vec![slit("-"), strafter_f(base_t.clone(), "-")],
+                    )),
+                )),
+            );
+            Some(SparExpr::If(
+                Box::new(has_tz_name),
+                Box::new(tz_name),
+                Box::new(offset_str),
+            ))
+        }
+        "offset" => {
+            // Always return the UTC offset string: "+HH:MM", "-HH:MM", or "Z".
+            let t = time_str();
+            let base_t = SparExpr::If(
+                Box::new(contains_f(t.clone(), "[")),
+                Box::new(strbefore_f(t.clone(), "[")),
+                Box::new(t.clone()),
+            );
+            let ends_z = strends_f(base_t.clone(), "Z");
+            let has_plus = contains_f(base_t.clone(), "+");
+            Some(SparExpr::If(
+                Box::new(ends_z),
+                Box::new(slit("Z")),
+                Box::new(SparExpr::If(
+                    Box::new(has_plus.clone()),
+                    Box::new(SparExpr::FunctionCall(
+                        Function::Concat,
+                        vec![slit("+"), strafter_f(base_t.clone(), "+")],
+                    )),
+                    Box::new(SparExpr::FunctionCall(
+                        Function::Concat,
+                        vec![slit("-"), strafter_f(base_t.clone(), "-")],
+                    )),
+                )),
+            ))
+        }
+        "offsetMinutes" => {
+            // Timezone offset in minutes: sign * (HH * 60 + MM).
+            let t = time_str();
+            let base_t = SparExpr::If(
+                Box::new(contains_f(t.clone(), "[")),
+                Box::new(strbefore_f(t.clone(), "[")),
+                Box::new(t.clone()),
+            );
+            let ends_z = strends_f(base_t.clone(), "Z");
+            let has_plus = contains_f(base_t.clone(), "+");
+            let offset_abs = SparExpr::If(
+                Box::new(has_plus.clone()),
+                Box::new(strafter_f(base_t.clone(), "+")),
+                Box::new(strafter_f(base_t.clone(), "-")),
+            );
+            let abs_mins = SparExpr::Add(
+                Box::new(SparExpr::Multiply(
+                    Box::new(int_cast(substr2(offset_abs.clone(), 1, 2))),
+                    Box::new(dim(60)),
+                )),
+                Box::new(int_cast(substr2(offset_abs.clone(), 4, 2))),
+            );
+            let signed_mins = SparExpr::If(
+                Box::new(has_plus),
+                Box::new(abs_mins.clone()),
+                Box::new(SparExpr::UnaryMinus(Box::new(abs_mins))),
+            );
+            Some(SparExpr::If(
+                Box::new(ends_z),
+                Box::new(dim(0)),
+                Box::new(signed_mins),
+            ))
+        }
+        "offsetSeconds" => {
+            // Same as offsetMinutes but * 60.
+            let t = time_str();
+            let base_t = SparExpr::If(
+                Box::new(contains_f(t.clone(), "[")),
+                Box::new(strbefore_f(t.clone(), "[")),
+                Box::new(t.clone()),
+            );
+            let ends_z = strends_f(base_t.clone(), "Z");
+            let has_plus = contains_f(base_t.clone(), "+");
+            let offset_abs = SparExpr::If(
+                Box::new(has_plus.clone()),
+                Box::new(strafter_f(base_t.clone(), "+")),
+                Box::new(strafter_f(base_t.clone(), "-")),
+            );
+            let abs_mins = SparExpr::Add(
+                Box::new(SparExpr::Multiply(
+                    Box::new(int_cast(substr2(offset_abs.clone(), 1, 2))),
+                    Box::new(dim(60)),
+                )),
+                Box::new(int_cast(substr2(offset_abs.clone(), 4, 2))),
+            );
+            let signed_mins = SparExpr::If(
+                Box::new(has_plus),
+                Box::new(abs_mins.clone()),
+                Box::new(SparExpr::UnaryMinus(Box::new(abs_mins))),
+            );
+            Some(SparExpr::Multiply(
+                Box::new(SparExpr::If(
+                    Box::new(ends_z),
+                    Box::new(dim(0)),
+                    Box::new(signed_mins),
+                )),
+                Box::new(dim(60)),
+            ))
+        }
         // ── Arithmetic-based exotic components ──────────────────────────────
         other => lqa_temporal_component_expr(other, arg),
     }
