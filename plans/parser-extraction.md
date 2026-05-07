@@ -1,7 +1,7 @@
 # Parser Extraction — Standalone `cypher-parser` / `gql-parser` Crate
 
-**Status**: planned  
-**Updated**: 2026-04-16
+**Status**: complete  
+**Updated**: 2026-05-07
 
 > See also the discussion notes appended at the end of this document for context on the spargebra comparison.
 
