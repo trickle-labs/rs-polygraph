@@ -1,8 +1,8 @@
 # TCK Failure Reference
 
-**Updated**: 2026-05-07  
+**Updated**: 2026-06-07  
 **Baseline**: 3787 / 3828 passing (98.9 %), **41 failing**.  
-**Legacy fallbacks**: ~647 scenario executions still route through the legacy translator — goal is zero (see Phase 8.7).  
+**Legacy fallbacks**: ~571 scenario executions still route through the legacy translator — goal is zero (see Phase 8.7).  
 **Target**: ≥ 3790 (≥ 99 %) — see [plans/l2-runtime-support.md](plans/l2-runtime-support.md).
 
 This file is the authoritative, searchable reference for every currently-failing
@@ -304,10 +304,15 @@ Ordered by (passes unlocked) / (effort days):
 
 Every scenario that routes through the legacy translator is a blocker for
 **Phase 8.7** (delete `src/translator/`). The LQA path returns
-`Err(Unsupported)` for 647 scenario executions across three fallback
+`Err(Unsupported)` for 571 scenario executions across three fallback
 classes. Instrument with `POLYGRAPH_TRACE_LEGACY=1 cargo test --test tck`.
 
-### Class A — LQA compile-time `Unsupported`  *(491 events)*
+**Recent progress** (2026-06-07):
+- `ListSlice` (15 events) → **eliminated** (compile-time fold implemented)
+- `list/map equality with null elements` (47→3) → **reduced by 44** (TriBool fold)
+- `list IN with null elements` (16→0) → **eliminated** (TriBool fold)
+
+### Class A — LQA compile-time `Unsupported`  *(415 events)*
 
 The LQA Op tree is lowered but `sparql.rs` cannot compile it to SPARQL.
 Fix track: extend `crates/polygraph/src/lqa/sparql.rs`.
@@ -316,25 +321,23 @@ Fix track: extend `crates/polygraph/src/lqa/sparql.rs`.
 |--------------------|-------:|---------|----------|
 | `Quantifier over non-constant list` | 97 | L2 | Q-a / Q-b buckets above |
 | `list comprehension [x IN list WHERE pred \| expr]` | 95 | L2 | LC bucket above |
-| `list/map equality with null elements` | 47 | L1 | Extend null-equality path in `sparql.rs` |
 | `UNWIND with variable/expression list` | 35 | L2 | UNWIND-var Continuation |
 | `non-literal value (List) in UNWIND/VALUES context` | 31 | L2 | UNWIND-var Continuation |
 | `range()` | 27 | L1 | Const-int propagation (partially done); step from UNWIND |
 | `path value in projection` | 17 | L2 | Path decomposition |
-| `list IN with null elements` | 16 | L1 | Extend null-IN path in `sparql.rs` |
 | `PatternComprehension` expression type | 15 | L2 | LC bucket |
-| `ListSlice` expression type | 15 | L1 | Implement `[start..end]` slice in `sparql.rs` |
 | `duration()` constructor | 11 | L1 | Port duration literal constructor |
 | `Exists` expression type | 9 | L1 | Port EXISTS subquery in `sparql.rs` |
 | `list concatenation with dynamic operands` | 8 | L2 | Runtime list concat |
 | `Subscript` expression type | 8 | L1 | Implement `list[idx]` subscript in `sparql.rs` |
-| `property access on scalar variable (var=nonMap)` | 6 | L1 | Guard against non-map property access |
-| `property access on scalar variable (var=nonGraphElement)` | 6 | L1 | Guard against non-graph property access |
+| `property access on scalar variable (var=nonMap)` | 6 | L1 | TypeError guard; return null for non-map/non-graph |
+| `property access on scalar variable (var=nonGraphElement)` | 6 | L1 | TypeError guard |
 | `collect()` aggregate | 6 | L2 | Runtime aggregate materialisation |
-| `property access on scalar variable (var=list)` | 4 | L1 | List element property access |
+| `property access on scalar variable (var=list)` | 4+6 | L1 | List element property access (TypeError) |
 | `non-literal value (Variable) in UNWIND/VALUES context` | 4 | L2 | UNWIND-var Continuation |
 | `list ordering comparison` | 4 | L1 | Extend cypher_compare in LQA |
 | `properties()` | 3 | L2 | Runtime map extraction |
+| `list/map equality with null elements` | 3 | L1 | 3 dynamic cases remain; 44 literal cases eliminated |
 | `labels()` | 3 | L2 | Runtime label extraction |
 | `Aggregate` expression type (non-standard position) | 3 | L1 | Aggregates outside RETURN |
 | `type(r)` with unknown/multiple edge types | 2 | L1 | Union-type branching |
@@ -344,7 +347,7 @@ Fix track: extend `crates/polygraph/src/lqa/sparql.rs`.
 | `rand()` | 1 | L1/L3 | rand() is non-deterministic; may stay L3 |
 | Other rare constructs | ~8 | L1/L2 | See trace output |
 
-### Class B — LQA write-path `Unsupported`  *(92 events)*
+### Class B — LQA write-path `Unsupported`  *(93 events)*
 
 The mutation (CREATE/MERGE/SET/DELETE) pipeline rejects. These go through
 `lqa/write.rs`.
@@ -358,9 +361,9 @@ Fix track: extend `crates/polygraph/src/lqa/write.rs`.
 | `write_merge_with_outer_match` | 10 | L2 | MERGE where outer MATCH provides binding |
 | `write_set_complex_expr` | 5 | L1 | SET property value is a complex expression |
 | `write_merge_rel_unbound_nodes` | 5 | L1 | MERGE relationship whose nodes are unbound |
-| `write_select_complex` | 1 | L1 | SELECT after write complex |
+| `lqa_write_select complex return expression` | 1 | L1 | SELECT after write with complex expression in RETURN |
 
-### Class C — `is_lqa_safe` pre-flight rejected  *(64 events)*
+### Class C — `is_lqa_safe` pre-flight rejected  *(62 events)*
 
 The safety pre-pass decides the AST shape cannot be lowered by LQA at all.
 Fix track: `try_lqa_path()` in `crates/polygraph/src/lib.rs` + add LQA
@@ -371,7 +374,7 @@ support for each gating reason.
 | `named_path_varlen` | 21 | L2 | Named path over varlen patterns → path decomposition |
 | `varlen_named_relvar` | 13 | L1 | Varlen pattern with named relationship variable |
 | `relvar_after_with` | 11 | L1 | Relationship variable referenced after a WITH boundary |
-| `unbounded_varlen_unlabeled` | 10 | L1 | `[*]` without label/type bound — safety limit |
+| `unbounded_varlen_unlabeled` | 9 | L1 | `[*]` without label/type bound — safety limit |
 | `with_orderby_shadow_alias` | 3 | L1 | WITH item alias shadows an ORDER BY key |
 | `named_path_with_real_agg` | 3 | L1 | Named path combined with real aggregate in same WITH |
 | `varlen_rel_props` | 1 | L1 | Varlen relationship with inline property filter |

@@ -3655,6 +3655,22 @@ impl Compiler {
                     // Delegate to the Property handler by synthesising the expression.
                     return self.lower_expr(&Expr::Property(base.clone(), key_str));
                 }
+                // Constant integer index on a variable known to be a compile-time literal list.
+                // e.g. `WITH [1,2,3] AS list  RETURN list[0]` → fold here.
+                if let Expr::Variable { name: vname, .. } = base.as_ref() {
+                    if let Some(items) = self.scalar_list_exprs.get(vname.as_str()).cloned() {
+                        if let Some(idx) = lqa_eval_int_expr(key) {
+                            let len = items.len() as i64;
+                            let i = if idx < 0 { len + idx } else { idx };
+                            if i >= 0 && (i as usize) < items.len() {
+                                return self.lower_expr(&items[i as usize]);
+                            }
+                            // Out of bounds → null.
+                            let null_var = self.fresh("null");
+                            return Ok(SparExpr::Variable(null_var));
+                        }
+                    }
+                }
                 // Constant integer index on a literal list → already folded in lower.rs.
                 // Any remaining Subscript is runtime-dynamic → legacy.
                 Err(PolygraphError::Unsupported {
@@ -5223,6 +5239,18 @@ impl Compiler {
             "head" | "first" => {
                 // Constant folding: head over a compile-time constant list.
                 let arg = args.first().ok_or_else(|| arg_err(name))?;
+                // Resolve variable alias to its literal list (e.g. `WITH [1,2,3] AS list`).
+                let resolved;
+                let arg = if let Expr::Variable { name: vname, .. } = arg {
+                    if let Some(items) = self.scalar_list_exprs.get(vname.as_str()).cloned() {
+                        resolved = Expr::List(items);
+                        &resolved
+                    } else {
+                        arg
+                    }
+                } else {
+                    arg
+                };
                 match arg {
                     Expr::List(items) => {
                         if items.is_empty() {
@@ -5241,6 +5269,18 @@ impl Compiler {
             "last" => {
                 // Constant folding: last over a compile-time constant list.
                 let arg = args.first().ok_or_else(|| arg_err(name))?;
+                // Resolve variable alias to its literal list (e.g. `WITH [1,2,3] AS list`).
+                let resolved;
+                let arg = if let Expr::Variable { name: vname, .. } = arg {
+                    if let Some(items) = self.scalar_list_exprs.get(vname.as_str()).cloned() {
+                        resolved = Expr::List(items);
+                        &resolved
+                    } else {
+                        arg
+                    }
+                } else {
+                    arg
+                };
                 match arg {
                     Expr::List(items) => {
                         if items.is_empty() {
@@ -6693,6 +6733,14 @@ fn lqa_expr_is_string(e: &Expr) -> bool {
 /// Evaluate a compile-time string expression.  Handles string literals and
 /// string concatenation of literals (e.g. `'nam' + 'e'` → `"name"`).
 /// Returns `None` for any expression with a runtime component.
+/// Evaluate an expression to a constant integer if possible at compile time.
+fn lqa_eval_int_expr(expr: &Expr) -> Option<i64> {
+    match expr {
+        Expr::Literal(Literal::Integer(n)) => Some(*n),
+        _ => None,
+    }
+}
+
 fn lqa_eval_string_expr(expr: &Expr) -> Option<String> {
     match expr {
         Expr::Literal(Literal::String(s)) => Some(s.clone()),
