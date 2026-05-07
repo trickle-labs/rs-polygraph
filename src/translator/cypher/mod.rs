@@ -3677,7 +3677,7 @@ impl TranslationState {
             Expression::List(items) => {
                 // Literal list: expand to VALUES ?var { val1 val2 ... }
                 // Each element is either a ground term, nested list, or map (encoded as string).
-                let bindings_result: Result<Vec<Vec<Option<GroundTerm>>>, _> = items
+                let bindings_result: Result<Vec<Vec<Option<GroundTerm>>>, PolygraphError> = items
                     .iter()
                     .map(|e| match e {
                         Expression::Literal(Literal::Null) => Ok(vec![None]),

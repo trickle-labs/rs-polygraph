@@ -836,7 +836,7 @@ impl Compiler {
                                     }
                                 }) {
                                     let sort_expr = SparExpr::Variable(Self::var(alias));
-                                    return Ok(match sk.dir {
+                                    return Ok::<_, PolygraphError>(match sk.dir {
                                         SortDir::Asc => OrderExpression::Asc(sort_expr),
                                         SortDir::Desc => OrderExpression::Desc(sort_expr),
                                     });
@@ -5042,7 +5042,7 @@ impl Compiler {
                         self.pending_optional_triples.extend(new_triples);
                         Ok(expr)
                     })
-                    .collect::<Result<Vec<_>, _>>()?;
+                    .collect::<Result<Vec<_>, PolygraphError>>()?;
                 Ok(SparExpr::Coalesce(largs))
             }
             "head" | "first" => {

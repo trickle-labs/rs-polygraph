@@ -1,0 +1,229 @@
+// ============================================================
+// ISO GQL grammar — Phase 5 core read-query subset
+// ISO/IEC 39075:2024 Graph Query Language
+//
+// Covers:
+//   MATCH, OPTIONAL MATCH, FILTER/WHERE, RETURN, NEXT
+//   Node patterns with :Label and IS Label [ & Label]
+//   Relationship patterns with -[r:TYPE]-> or -[r IS TYPE]->
+//   ORDER BY, SKIP, LIMIT
+//   Aggregation: count(*), count(expr), sum, avg, min, max, collect
+//   Basic UNWIND, CREATE, MERGE, SET, DELETE, REMOVE, CALL
+//
+// Strategy: patterns mirror Cypher; IS is an alias for ':' in node/edge type specs.
+// FILTER is an alias for WHERE.
+// NEXT closes the current query scope (maps to WITH *).
+// ============================================================
+
+// ----- Whitespace & comments (silent) -----------------------
+WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
+COMMENT    = _{ "//" ~ (!NEWLINE ~ ANY)* ~ NEWLINE?
+              | "/*" ~ (!"*/" ~ ANY)* ~ "*/" }
+
+// ----- Entry point ------------------------------------------
+query     = { SOI ~ statement ~ EOI }
+statement = { clause+ }
+clause    = { match_clause | unwind_clause | filter_clause | return_clause
+            | next_clause | create_clause | merge_clause | set_clause
+            | delete_clause | remove_clause | call_clause }
+
+// ----- Keywords (case-insensitive, word-boundary guarded) ---
+ident_char  = _{ ASCII_ALPHANUMERIC | "_" }
+
+kw_MATCH    = @{ ^"MATCH"    ~ !ident_char }
+kw_OPTIONAL = @{ ^"OPTIONAL" ~ !ident_char }
+kw_RETURN   = @{ ^"RETURN"   ~ !ident_char }
+kw_WHERE    = @{ ^"WHERE"    ~ !ident_char }
+kw_FILTER   = @{ ^"FILTER"   ~ !ident_char }
+kw_WITH     = @{ ^"WITH"     ~ !ident_char }
+kw_AS       = @{ ^"AS"       ~ !ident_char }
+kw_DISTINCT = @{ ^"DISTINCT" ~ !ident_char }
+kw_AND      = @{ ^"AND"      ~ !ident_char }
+kw_OR       = @{ ^"OR"       ~ !ident_char }
+kw_XOR      = @{ ^"XOR"      ~ !ident_char }
+kw_NOT      = @{ ^"NOT"      ~ !ident_char }
+kw_NULL     = @{ ^"NULL"     ~ !ident_char }
+kw_TRUE     = @{ ^"TRUE"     ~ !ident_char }
+kw_FALSE    = @{ ^"FALSE"    ~ !ident_char }
+kw_IS       = @{ ^"IS"       ~ !ident_char }
+kw_IN       = @{ ^"IN"       ~ !ident_char }
+kw_CONTAINS = @{ ^"CONTAINS" ~ !ident_char }
+kw_STARTS   = @{ ^"STARTS"   ~ !ident_char }
+kw_ENDS     = @{ ^"ENDS"     ~ !ident_char }
+kw_NEXT     = @{ ^"NEXT"     ~ !ident_char }
+// Sorting
+kw_ORDER    = @{ ^"ORDER"    ~ !ident_char }
+kw_BY       = @{ ^"BY"       ~ !ident_char }
+kw_ASC      = @{ ^"ASC"      ~ !ident_char }
+kw_DESC     = @{ ^"DESC"     ~ !ident_char }
+kw_SKIP     = @{ ^"SKIP"     ~ !ident_char }
+kw_LIMIT    = @{ ^"LIMIT"    ~ !ident_char }
+// Write clauses
+kw_UNWIND   = @{ ^"UNWIND"   ~ !ident_char }
+kw_CREATE   = @{ ^"CREATE"   ~ !ident_char }
+kw_MERGE    = @{ ^"MERGE"    ~ !ident_char }
+kw_SET      = @{ ^"SET"      ~ !ident_char }
+kw_DELETE   = @{ ^"DELETE"   ~ !ident_char }
+kw_DETACH   = @{ ^"DETACH"   ~ !ident_char }
+kw_REMOVE   = @{ ^"REMOVE"   ~ !ident_char }
+kw_CALL     = @{ ^"CALL"     ~ !ident_char }
+// Aggregate functions (lowercase, case-insensitive)
+kw_COUNT    = @{ ^"count"    ~ !ident_char }
+kw_SUM      = @{ ^"sum"      ~ !ident_char }
+kw_AVG      = @{ ^"avg"      ~ !ident_char }
+kw_MIN      = @{ ^"min"      ~ !ident_char }
+kw_MAX      = @{ ^"max"      ~ !ident_char }
+kw_COLLECT  = @{ ^"collect"  ~ !ident_char }
+kw_WITH_kw  = @{ ^"WITH"     ~ !ident_char }
+
+// Silent aggregate for variable negative lookahead
+keyword = _{
+    kw_MATCH | kw_OPTIONAL | kw_RETURN | kw_WHERE | kw_FILTER | kw_WITH |
+    kw_AS | kw_DISTINCT | kw_AND | kw_OR | kw_XOR | kw_NOT | kw_NULL |
+    kw_TRUE | kw_FALSE | kw_IS | kw_IN | kw_CONTAINS | kw_STARTS | kw_ENDS |
+    kw_NEXT | kw_ORDER | kw_BY | kw_SKIP | kw_LIMIT | kw_UNWIND |
+    kw_CREATE | kw_MERGE | kw_SET | kw_DELETE | kw_DETACH | kw_REMOVE | kw_CALL
+}
+
+// ----- Identifiers & variables ------------------------------
+ident         = @{ (ASCII_ALPHA | "_") ~ ident_char* }
+ident_escaped = @{ "`" ~ (!"`" ~ ANY)+ ~ "`" }
+variable      = { !(keyword ~ !ident_char) ~ (ident_escaped | ident) }
+
+// ----- Clauses ----------------------------------------------
+match_clause    = { optional_marker? ~ kw_MATCH ~ pattern_list ~ match_where? }
+optional_marker = { kw_OPTIONAL }
+// Inline WHERE on a MATCH clause (WHERE only; FILTER is a standalone GQL clause).
+match_where     = { kw_WHERE ~ expression }
+// Standalone FILTER (GQL) or WHERE clause. FILTER is always a separate clause
+// in GQL and is never consumed by the MATCH rule.
+filter_clause   = { (kw_WHERE | kw_FILTER) ~ expression }
+// RETURN with optional modifiers
+return_clause   = { kw_RETURN ~ return_body ~ order_by_clause? ~ skip_clause? ~ limit_clause? }
+// NEXT = close current query block, optionally project (maps to WITH * in Cypher)
+next_clause     = { kw_NEXT ~ (kw_WITH_kw ~ return_body)? }
+
+// Write clauses (parsed but emit UnsupportedFeature at translation time)
+unwind_clause   = { kw_UNWIND ~ expression ~ kw_AS ~ variable }
+create_clause   = { kw_CREATE ~ pattern_list }
+merge_clause    = { kw_MERGE ~ pattern }
+set_clause      = { kw_SET ~ set_item ~ ("," ~ set_item)* }
+set_item        = { prop_access_expr ~ "=" ~ expression
+                  | variable ~ "+=" ~ map_literal
+                  | variable ~ "=" ~ expression }
+prop_access_expr = { variable ~ "." ~ prop_name }
+delete_clause   = { detach_marker? ~ kw_DELETE ~ expression ~ ("," ~ expression)* }
+detach_marker   = { kw_DETACH }
+remove_clause   = { kw_REMOVE ~ remove_item ~ ("," ~ remove_item)* }
+remove_item     = { prop_access_expr | variable ~ node_labels }
+call_clause     = { kw_CALL ~ proc_name ~ "(" ~ (expression ~ ("," ~ expression)*)? ~ ")" ~ (kw_WITH_kw ~ yield_items)? }
+proc_name       = @{ ident ~ ("." ~ ident)* }
+yield_items     = { variable ~ ("," ~ variable)* }
+
+// ORDER BY / SKIP / LIMIT
+order_by_clause = { kw_ORDER ~ kw_BY ~ sort_item ~ ("," ~ sort_item)* }
+sort_item       = { expression ~ sort_direction? }
+sort_direction  = { kw_ASC | kw_DESC }
+skip_clause     = { kw_SKIP ~ expression }
+limit_clause    = { kw_LIMIT ~ expression }
+
+// ----- Return / With body -----------------------------------
+return_body     = { distinct_marker? ~ return_items }
+distinct_marker = { kw_DISTINCT }
+return_items    = { star_projection | explicit_items }
+star_projection  = { "*" }
+explicit_items   = { return_item ~ ("," ~ return_item)* }
+return_item     = { expression ~ (kw_AS ~ variable)? }
+
+// ----- Pattern ----------------------------------------------
+pattern_list       = { pattern ~ ("," ~ pattern)* }
+pattern            = { (variable ~ "=")? ~ node_pattern_chain }
+node_pattern_chain = { node_pattern ~ chain_link* }
+chain_link         = { rel_pattern ~ node_pattern }
+
+// ----- Node pattern -----------------------------------------
+// GQL supports both `:Label` and `IS Label [& Label]` notation.
+node_pattern  = { "(" ~ variable? ~ node_labels? ~ gql_is_labels? ~ properties? ~ ")" }
+node_labels   = { node_label+ }
+node_label    = { ":" ~ (ident_escaped | ident) }
+// IS Label [& Label2 & ...] — GQL-specific type predicate
+gql_is_labels = { kw_IS ~ gql_label_name ~ (gql_label_and ~ gql_label_name)* }
+gql_label_and = { "&" }
+gql_label_name = { ident_escaped | ident }
+
+// ----- Relationship pattern ---------------------------------
+rel_pattern  = { left_arrow ~ rel_body ~ rel_dash
+               | rel_dash   ~ rel_body ~ right_arrow
+               | rel_dash   ~ rel_body ~ rel_dash }
+left_arrow   = { "<-" }
+right_arrow  = { "->" }
+rel_dash     = { "-" }
+
+// rel_body supports :TYPE and IS TYPE
+rel_body           = { ("[" ~ variable? ~ rel_type_spec? ~ range_literal? ~ properties? ~ "]")? }
+rel_type_spec      = { colon_type_list | is_type_list }
+colon_type_list    = { ":" ~ rel_type_elem ~ ("|" ~ ":"? ~ rel_type_elem)* }
+is_type_list       = { kw_IS ~ rel_type_elem ~ ("|" ~ rel_type_elem)* }
+rel_type_elem      = { ident_escaped | ident }
+range_literal      = { "*" ~ (integer_literal ~ (".." ~ integer_literal?)?)? }
+
+// ----- Properties -------------------------------------------
+properties  = { map_literal }
+map_literal = { "{" ~ (map_entry ~ ("," ~ map_entry)*)? ~ "}" }
+map_entry   = { prop_name ~ ":" ~ expression }
+prop_name   = { ident_escaped | ident }
+
+// ----- Expressions (same precedence as Cypher) --------------
+expression          = { or_expr }
+or_expr             = { xor_expr    ~ (kw_OR   ~ xor_expr)* }
+xor_expr            = { and_expr    ~ (kw_XOR  ~ and_expr)* }
+and_expr            = { not_expr    ~ (kw_AND  ~ not_expr)* }
+not_expr            = { kw_NOT ~ not_expr | comparison_expr }
+comparison_expr     = { add_sub_expr ~ comparison_suffix? }
+comparison_suffix   = { comp_op ~ add_sub_expr
+                      | kw_IS ~ kw_NOT ~ kw_NULL
+                      | kw_IS ~ kw_NULL
+                      | kw_IN ~ add_sub_expr
+                      | kw_STARTS ~ kw_WITH ~ add_sub_expr
+                      | kw_ENDS   ~ kw_WITH ~ add_sub_expr
+                      | kw_CONTAINS ~ add_sub_expr }
+comp_op             = { "=" | "<>" | "<=" | ">=" | "<" | ">" }
+add_sub_expr        = { mul_div_expr ~ (add_sub_op ~ mul_div_expr)* }
+add_sub_op          = { "+" | "-" }
+mul_div_expr        = { unary_expr ~ (mul_div_op ~ unary_expr)* }
+mul_div_op          = { "*" | "/" | "%" }
+unary_expr          = { unary_minus | power_expr }
+unary_minus         = { "-" ~ unary_expr }
+power_expr          = { prop_expr ~ ("^" ~ unary_expr)? }
+prop_expr           = { atom ~ property_lookup* }
+property_lookup     = { "." ~ prop_name }
+
+atom        = { float_literal
+              | integer_literal
+              | string_literal
+              | boolean_literal
+              | null_literal
+              | aggregate_expr
+              | list_literal
+              | map_literal
+              | "(" ~ expression ~ ")"
+              | variable }
+
+// ----- Aggregate expressions --------------------------------
+aggregate_expr   = { count_expr | agg_call_expr }
+count_expr       = { kw_COUNT ~ "(" ~ (count_star | (kw_DISTINCT? ~ expression)) ~ ")" }
+count_star       = { "*" }
+agg_call_expr    = { agg_func_name ~ "(" ~ kw_DISTINCT? ~ expression ~ ")" }
+agg_func_name    = { kw_SUM | kw_AVG | kw_MIN | kw_MAX | kw_COLLECT }
+
+// ----- Literals ---------------------------------------------
+boolean_literal = { kw_TRUE | kw_FALSE }
+null_literal    = { kw_NULL }
+integer_literal = @{ ASCII_DIGIT+ }
+float_literal   = @{ ASCII_DIGIT+ ~ "." ~ ASCII_DIGIT+
+                    ~ (^"e" ~ ("+" | "-")? ~ ASCII_DIGIT+)? }
+string_literal  = @{ "\"" ~ double_str_char* ~ "\""
+                   | "'"  ~ single_str_char* ~ "'"  }
+double_str_char = { !("\"" | "\\") ~ ANY | "\\" ~ ANY }
+single_str_char = { !("'"  | "\\") ~ ANY | "\\" ~ ANY }
+list_literal    = { "[" ~ (expression ~ ("," ~ expression)*)? ~ "]" }

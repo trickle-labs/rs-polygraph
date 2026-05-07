@@ -13,12 +13,13 @@ See [ROADMAP.md](ROADMAP.md) for phased delivery. Design documents live in `plan
 | [implementation-plan.md](plans/implementation-plan.md) | complete | Module layout, crate structure, initial design decisions |
 | [fundamental-limitations.md](plans/fundamental-limitations.md) | reference | Hard limits of the static transpiler; L1/L2/L3 mitigation levels |
 | [target-engines.md](plans/target-engines.md) | reference | SPARQL engine capability analysis (`TargetEngine` trait) |
-| [spec-first-pivot.md](plans/spec-first-pivot.md) | in progress | Active: spec-anchored LQA + differential testing pivot (v0.6.0) |
+| [spec-first-pivot.md](plans/spec-first-pivot.md) | in progress | Active: LQA bucket-drain + legacy translator deletion; Phases 6–8 in progress (v0.8.1 baseline) |
+| [scenario-debt.md](plans/scenario-debt.md) | complete | Inventory of ad-hoc probe files in `examples/`; all deleted (Phase 0 deliverable) |
 | [iana-timezone.md](plans/iana-timezone.md) | planned | Replace static DST table with `chrono-tz`; fix 10 timezone TCK failures |
-| [release.md](plans/release.md) | planned | CI workflows, crates.io publishing, docs.rs, GitHub Pages (v0.7.0) |
-| [write-clause-api.md](plans/write-clause-api.md) | planned | Promote write-clause transpilation to public API; Neo4j getting-started tutorial on Oxigraph (v0.7.1) |
-| [result-mapping.md](plans/result-mapping.md) | planned | SPARQL results → openCypher values hydration API (v0.8.0) |
-| [l2-runtime-support.md](plans/l2-runtime-support.md) | planned | Multi-phase (L2) runtime API; `TranspileOutput::Continuation` design (v0.8.1) |
+| [release.md](plans/release.md) | complete | CI workflows, crates.io publishing, docs.rs, GitHub Pages (v0.7.0) |
+| [write-clause-api.md](plans/write-clause-api.md) | complete | Write-clause public API (`cypher_to_sparql_update` / `gql_to_sparql_update`); movie-graph integration test (v0.7.1) |
+| [result-mapping.md](plans/result-mapping.md) | complete | SPARQL results → openCypher values hydration API (`map_results`, v0.8.0) |
+| [l2-runtime-support.md](plans/l2-runtime-support.md) | in progress | Multi-phase (L2) runtime API; `TranspileOutput::Continuation` + `runtime::drive()` (v0.8.1 baseline, ongoing) |
 | [parser-extraction.md](plans/parser-extraction.md) | planned | Extract parser/AST into standalone `opencypher-parser` crate (v0.9.0) |
 | [pg-extension-protocol.md](plans/pg-extension-protocol.md) | planned | Postgres triplestore custom SPARQL functions for path decomposition (v0.9.1) |
 

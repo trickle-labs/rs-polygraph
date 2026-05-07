@@ -93,7 +93,7 @@ git push && git push --tags
 
 The `release.yml` workflow will trigger on the tag, run CI again, and publish
 to crates.io automatically. Monitor it at:
-`https://github.com/BaardBouvet/rs-polygraph/actions`
+`https://github.com/trickle-labs/rs-polygraph/actions`
 
 ### 7. Verify publication
 

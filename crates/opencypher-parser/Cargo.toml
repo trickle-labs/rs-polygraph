@@ -1,0 +1,21 @@
+[package]
+name = "opencypher-parser"
+version = "0.1.0"
+edition = "2021"
+authors = ["rs-polygraph contributors"]
+license = "Apache-2.0"
+description = "Standalone openCypher and ISO GQL parser producing a typed AST. No execution engine required."
+repository = "https://github.com/trickle-labs/rs-polygraph"
+readme = "README.md"
+keywords = ["cypher", "opencypher", "gql", "graph", "parser"]
+categories = ["parser-implementations", "database"]
+rust-version = "1.80"
+
+[lib]
+name = "opencypher_parser"
+path = "src/lib.rs"
+
+[dependencies]
+pest = "2.7"
+pest_derive = "2.7"
+thiserror = "2.0"

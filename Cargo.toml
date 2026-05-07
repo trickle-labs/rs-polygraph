@@ -1,11 +1,11 @@
 [package]
 name = "polygraph"
-version = "0.8.1"
+version = "0.9.0"
 edition = "2021"
 authors = ["rs-polygraph contributors"]
 license = "Apache-2.0"
 description = "A Rust library that transpiles openCypher and ISO GQL queries into SPARQL 1.1 algebra"
-repository = "https://github.com/BaardBouvet/rs-polygraph"
+repository = "https://github.com/trickle-labs/rs-polygraph"
 readme = "README.md"
 keywords = ["cypher", "sparql", "gql", "transpiler", "graph"]
 categories = ["parser-implementations", "database-interfaces"]
@@ -16,7 +16,7 @@ exclude = ["tests/tck/features/**", "plans/**"]
 all-features = true
 
 [workspace]
-members = ["polygraph-difftest"]
+members = ["polygraph-difftest", "crates/opencypher-parser"]
 
 [lib]
 name = "polygraph"
@@ -88,6 +88,7 @@ name = "movie_graph"
 path = "tests/integration/movie_graph.rs"
 
 [dependencies]
+opencypher-parser = { path = "crates/opencypher-parser" }
 pest = "2.7"
 pest_derive = "2.7"
 spargebra = { version = "0.4", features = ["sparql-12"] }

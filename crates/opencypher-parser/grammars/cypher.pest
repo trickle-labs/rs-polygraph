@@ -1,0 +1,419 @@
+// ============================================================
+// openCypher grammar — complete spec-faithful implementation
+//
+// Based on: https://github.com/opencypher/openCypher/tree/master/grammar
+//   (cypher.xml + basic-grammar.xml, canonical EBNF specification)
+//
+// Covers the full openCypher 9 surface:
+//   MATCH, OPTIONAL MATCH, WHERE, RETURN, WITH, UNWIND
+//   ORDER BY, SKIP, LIMIT, UNION, CALL/YIELD
+//   CREATE, MERGE (with ON MATCH/CREATE SET), SET, DELETE,
+//   DETACH DELETE, REMOVE, FOREACH
+//   Expressions: all operators, CASE, quantifiers, comprehensions,
+//   pattern predicates, EXISTS subquery, REDUCE
+//   Parameters ($name, $0), legacy parameters ({name})
+//   shortestPath / allShortestPaths
+//   Reserved words in schema positions (labels, rel-types, prop keys)
+//   Namespaced function/procedure names (apoc.text.join, etc.)
+//   Full string escape sequences (\n, \r, \t, \uXXXX, \UXXXXXXXX)
+//
+// Ordering follows the spec: WHERE comes AFTER ORDER BY/SKIP/LIMIT
+// in WITH clauses, matching ProjectionBody + optional Where.
+//
+// Case-insensitive keywords use the pest ^"KW" syntax.
+// ============================================================
+
+// ----- Whitespace & comments (silent) -----------------------
+WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
+COMMENT    = _{ "//" ~ (!NEWLINE ~ ANY)* ~ NEWLINE?
+              | "/*" ~ (!"*/" ~ ANY)* ~ "*/" }
+
+// ----- Entry point ------------------------------------------
+query     = { SOI ~ statement ~ EOI }
+
+// A statement is one or more single queries joined with UNION.
+statement    = { single_query ~ (union_marker ~ single_query)* }
+union_marker = { kw_UNION ~ kw_ALL? }
+single_query = { clause+ }
+
+clause = { match_clause
+          | unwind_clause
+          | with_clause
+          | return_clause
+          | create_clause
+          | merge_clause
+          | set_clause
+          | delete_clause
+          | remove_clause
+          | call_subquery
+          | call_clause
+          | foreach_clause }
+
+// ----- Keywords (case-insensitive, word-boundary guarded) ---
+ident_char  = _{ ASCII_ALPHANUMERIC | "_" }
+
+kw_MATCH              = @{ ^"MATCH"              ~ !ident_char }
+kw_OPTIONAL           = @{ ^"OPTIONAL"           ~ !ident_char }
+kw_RETURN             = @{ ^"RETURN"             ~ !ident_char }
+kw_WHERE              = @{ ^"WHERE"              ~ !ident_char }
+kw_WITH               = @{ ^"WITH"               ~ !ident_char }
+kw_AS                 = @{ ^"AS"                 ~ !ident_char }
+kw_DISTINCT           = @{ ^"DISTINCT"           ~ !ident_char }
+kw_AND                = @{ ^"AND"                ~ !ident_char }
+kw_OR                 = @{ ^"OR"                 ~ !ident_char }
+kw_XOR                = @{ ^"XOR"                ~ !ident_char }
+kw_NOT                = @{ ^"NOT"                ~ !ident_char }
+kw_NULL               = @{ ^"NULL"               ~ !ident_char }
+kw_TRUE               = @{ ^"TRUE"               ~ !ident_char }
+kw_FALSE              = @{ ^"FALSE"              ~ !ident_char }
+kw_IS                 = @{ ^"IS"                 ~ !ident_char }
+kw_IN                 = @{ ^"IN"                 ~ !ident_char }
+kw_CONTAINS           = @{ ^"CONTAINS"           ~ !ident_char }
+kw_STARTS             = @{ ^"STARTS"             ~ !ident_char }
+kw_ENDS               = @{ ^"ENDS"               ~ !ident_char }
+kw_ORDER              = @{ ^"ORDER"              ~ !ident_char }
+kw_BY                 = @{ ^"BY"                 ~ !ident_char }
+kw_ASC                = @{ ^"ASC"                ~ !ident_char }
+kw_DESC               = @{ ^"DESC"               ~ !ident_char }
+kw_SKIP               = @{ ^"SKIP"               ~ !ident_char }
+kw_LIMIT              = @{ ^"LIMIT"              ~ !ident_char }
+kw_UNWIND             = @{ ^"UNWIND"             ~ !ident_char }
+kw_CREATE             = @{ ^"CREATE"             ~ !ident_char }
+kw_MERGE              = @{ ^"MERGE"              ~ !ident_char }
+kw_ON                 = @{ ^"ON"                 ~ !ident_char }
+kw_SET                = @{ ^"SET"                ~ !ident_char }
+kw_DELETE             = @{ ^"DELETE"             ~ !ident_char }
+kw_DETACH             = @{ ^"DETACH"             ~ !ident_char }
+kw_REMOVE             = @{ ^"REMOVE"             ~ !ident_char }
+kw_CALL               = @{ ^"CALL"               ~ !ident_char }
+kw_YIELD              = @{ ^"YIELD"              ~ !ident_char }
+kw_UNION              = @{ ^"UNION"              ~ !ident_char }
+kw_ALL                = @{ ^"ALL"                ~ !ident_char }
+kw_ASCENDING          = @{ ^"ASCENDING"          ~ !ident_char }
+kw_DESCENDING         = @{ ^"DESCENDING"         ~ !ident_char }
+kw_CASE               = @{ ^"CASE"               ~ !ident_char }
+kw_WHEN               = @{ ^"WHEN"               ~ !ident_char }
+kw_THEN               = @{ ^"THEN"               ~ !ident_char }
+kw_ELSE               = @{ ^"ELSE"               ~ !ident_char }
+kw_END                = @{ ^"END"                ~ !ident_char }
+kw_ANY                = @{ ^"ANY"                ~ !ident_char }
+kw_NONE               = @{ ^"NONE"               ~ !ident_char }
+kw_SINGLE             = @{ ^"SINGLE"             ~ !ident_char }
+kw_FOREACH            = @{ ^"FOREACH"            ~ !ident_char }
+kw_EXISTS             = @{ ^"EXISTS"             ~ !ident_char }
+kw_REDUCE             = @{ ^"REDUCE"             ~ !ident_char }
+// COUNT matched case-insensitively so COUNT(*) and count(*) both work
+kw_COUNT              = @{ ^"COUNT"              ~ !ident_char }
+
+// Aggregate function keywords (lowercase per openCypher convention)
+kw_SUM                = @{ ^"sum"                ~ !ident_char }
+kw_AVG                = @{ ^"avg"                ~ !ident_char }
+kw_MIN                = @{ ^"min"                ~ !ident_char }
+kw_MAX                = @{ ^"max"                ~ !ident_char }
+kw_COLLECT            = @{ ^"collect"            ~ !ident_char }
+
+// shortestPath and allShortestPaths are function-like keywords
+kw_SHORTEST_PATH      = @{ ^"shortestPath"       ~ !ident_char }
+kw_ALL_SHORTEST_PATHS = @{ ^"allShortestPaths"   ~ !ident_char }
+
+// Reserved words per the spec — forbidden as variable names,
+// but ALLOWED in schema positions (labels, rel-types, prop-keys).
+reserved_word = _{
+    kw_ALL | kw_AS | kw_ASC | kw_ASCENDING | kw_BY |
+    kw_CREATE | kw_DELETE | kw_DESC | kw_DESCENDING | kw_DETACH |
+    kw_EXISTS | kw_LIMIT | kw_MATCH | kw_MERGE | kw_ON | kw_OPTIONAL |
+    kw_ORDER | kw_REMOVE | kw_RETURN | kw_SET | kw_SKIP | kw_WHERE |
+    kw_WITH | kw_UNION | kw_UNWIND |
+    kw_AND | kw_CONTAINS | kw_DISTINCT | kw_ENDS | kw_IN | kw_IS |
+    kw_NOT | kw_OR | kw_STARTS | kw_XOR |
+    kw_FALSE | kw_TRUE | kw_NULL |
+    kw_CASE | kw_WHEN | kw_THEN | kw_ELSE | kw_END
+}
+
+// Items allowed as both keywords and symbolic names.
+// The spec lists ANY, NONE, SINGLE, FILTER, EXTRACT, COUNT as SymbolicName.
+// We add FOREACH, REDUCE, EXISTS, CALL, YIELD for completeness.
+symbolic_name_extra = _{
+    kw_ANY | kw_NONE | kw_SINGLE | kw_COUNT | kw_COLLECT |
+    kw_SUM | kw_AVG | kw_MIN | kw_MAX |
+    kw_YIELD | kw_FOREACH | kw_REDUCE | kw_CALL | kw_EXISTS
+}
+
+// Full keyword list used in the variable negative-lookahead.
+keyword = _{
+    reserved_word | symbolic_name_extra |
+    kw_ORDER | kw_SKIP | kw_LIMIT | kw_UNWIND | kw_SET |
+    kw_DELETE | kw_DETACH | kw_REMOVE | kw_CALL | kw_UNION |
+    kw_ASCENDING | kw_DESCENDING |
+    kw_SHORTEST_PATH | kw_ALL_SHORTEST_PATHS
+}
+
+// ----- Identifiers & variables ------------------------------
+ident         = @{ (ASCII_ALPHA | "_") ~ ident_char* }
+// Backtick-escaped identifier; doubled backtick (``) encodes a literal backtick.
+ident_escaped = @{ "`" ~ (!"``" ~ !"` " ~ !("`" ~ !"`") ~ ANY | "``")+ ~ "`" }
+
+// Variable: a symbolic name that is not a reserved keyword.
+// symbolic_name_extra items ARE allowed as variables per the spec.
+// Note: we use !(reserved_word) rather than !(reserved_word ~ !ident_char)
+// because each kw_* rule already includes a !ident_char word-boundary guard.
+// Using the compound form `!(reserved_word ~ !ident_char)` causes whitespace
+// to be consumed between reserved_word and !ident_char, putting the boundary
+// check at the wrong position (e.g. "WHEN 1" would skip the space and check at
+// "1", which IS an ident_char, wrongly passing WHEN as a variable).
+variable = { !(reserved_word) ~ (ident_escaped | ident) }
+
+// Schema names: used for labels, relationship types, and property keys.
+// Reserved words ARE allowed in these positions (e.g. CREATE (n:MATCH)).
+schema_name = { ident_escaped | reserved_word | symbolic_name_extra | ident }
+
+// ----- Clauses ----------------------------------------------
+
+// MATCH [(OPTIONAL)] MATCH pattern [WHERE expr]
+match_clause    = { optional_marker? ~ kw_MATCH ~ pattern_list ~ where_clause? }
+optional_marker = { kw_OPTIONAL }
+where_clause    = { kw_WHERE ~ expression }
+
+// RETURN projection_body
+// Spec: ReturnBody = ProjectionBody (no trailing WHERE for RETURN)
+return_clause   = { kw_RETURN ~ projection_body }
+
+// WITH projection_body [WHERE expr]
+// Spec: WITH ProjectionBody [Where]   — WHERE is AFTER ORDER BY/SKIP/LIMIT
+with_clause     = { kw_WITH ~ projection_body ~ where_clause? }
+
+// Shared projection body: [DISTINCT] items [ORDER BY] [SKIP] [LIMIT]
+projection_body = { distinct_marker? ~ return_items ~ order_by_clause? ~ skip_clause? ~ limit_clause? }
+distinct_marker = { kw_DISTINCT }
+return_items    = { star_projection | explicit_items }
+star_projection = { "*" }
+explicit_items  = { return_item ~ ("," ~ return_item)* }
+return_item     = { expression ~ (kw_AS ~ variable)? }
+
+order_by_clause = { kw_ORDER ~ kw_BY ~ sort_item ~ ("," ~ sort_item)* }
+sort_item       = { expression ~ sort_direction? }
+sort_direction  = { kw_ASCENDING | kw_DESCENDING | kw_ASC | kw_DESC }
+skip_clause     = { kw_SKIP ~ expression }
+limit_clause    = { kw_LIMIT ~ expression }
+
+// UNWIND expr AS var
+unwind_clause   = { kw_UNWIND ~ expression ~ kw_AS ~ variable }
+
+// CREATE pattern
+create_clause   = { kw_CREATE ~ pattern_list }
+
+// MERGE pattern [ON MATCH SET ...] [ON CREATE SET ...]
+merge_clause    = { kw_MERGE ~ pattern ~ merge_action* }
+merge_action    = { kw_ON ~ (kw_MATCH | kw_CREATE) ~ set_clause }
+
+// SET items
+set_clause      = { kw_SET ~ set_item ~ ("," ~ set_item)* }
+set_item        = { prop_access_expr ~ "=" ~ expression
+                  | variable ~ "+=" ~ map_literal
+                  | variable ~ "=" ~ expression
+                  | variable ~ node_labels }
+prop_access_expr = { (variable | "(" ~ variable ~ ")") ~ "." ~ prop_name }
+
+// [DETACH] DELETE
+delete_clause   = { detach_marker? ~ kw_DELETE ~ expression ~ ("," ~ expression)* }
+detach_marker   = { kw_DETACH }
+
+// REMOVE items
+remove_clause   = { kw_REMOVE ~ remove_item ~ ("," ~ remove_item)* }
+remove_item     = { prop_access_expr | variable ~ node_labels }
+
+// CALL { statement } — subquery clause (Neo4j 5.x / GQL)
+// Parsed here; builder emits UnsupportedFeature until Phase 3 implements it.
+call_subquery   = { kw_CALL ~ "{" ~ statement ~ "}" }
+
+// CALL proc [(args)] [YIELD (* | items [WHERE expr])]
+call_clause     = { kw_CALL ~ proc_name ~ ("(" ~ call_args? ~ ")")? ~ yield_clause? }
+call_args       = { expression ~ ("," ~ expression)* }
+yield_clause    = { kw_YIELD ~ (yield_star | yield_items) ~ where_clause? }
+yield_star      = { "*" }
+yield_items     = { yield_item ~ ("," ~ yield_item)* }
+// [field AS] variable
+yield_item      = { (schema_name ~ kw_AS)? ~ variable }
+proc_name       = @{ ident ~ ("." ~ ident)* }
+
+// FOREACH (var IN expr | clause+)
+foreach_clause  = { kw_FOREACH ~ "(" ~ variable ~ kw_IN ~ expression ~ "|" ~ clause+ ~ ")" }
+
+// ----- Pattern ----------------------------------------------
+pattern_list           = { pattern ~ ("," ~ pattern)* }
+pattern                = { (variable ~ "=")? ~ anonymous_pattern_part }
+anonymous_pattern_part = { shortest_path_pattern | pattern_element }
+shortest_path_pattern  = { (kw_SHORTEST_PATH | kw_ALL_SHORTEST_PATHS) ~ "(" ~ pattern_element ~ ")" }
+pattern_element        = { node_pattern ~ pattern_element_chain* | "(" ~ pattern_element ~ ")" }
+pattern_element_chain  = { rel_pattern ~ node_pattern }
+
+// Node pattern: (var:Label1:Label2 {key: val})
+// Extended to support GQL inline WHERE predicate: (n:Person WHERE n.age > 18)
+node_pattern  = { "(" ~ variable? ~ node_labels? ~ properties? ~ where_clause? ~ ")" }
+
+// Label expression: :A, :A:B (AND stacking), :A|B (OR), :A&B (AND), :!A (NOT)
+// Flat combinators only; fully recursive label expressions are Phase 3.
+node_labels    = { node_label ~ gql_label_more* }
+node_label     = { ":" ~ "!"? ~ schema_name }
+// Additional label atoms after the first, using : (stack), | (OR), or & (AND)
+gql_label_more = { (":" | "|" | "&") ~ "!"? ~ schema_name }
+
+// Relationship patterns (left, right, undirected, bidir stub)
+rel_pattern   = { full_arrow
+                | left_arrow ~ rel_body ~ right_arrow
+                | left_arrow ~ rel_body ~ rel_dash
+                | rel_dash   ~ rel_body ~ right_arrow
+                | rel_dash   ~ rel_body ~ rel_dash }
+left_arrow    = { "<-" }
+right_arrow   = { "->" }
+rel_dash      = { "-" }
+full_arrow    = { "<-->" }
+
+rel_body      = { ("[" ~ variable? ~ rel_type_list? ~ range_literal? ~ properties? ~ "]")? }
+rel_type_list = { ":" ~ rel_type_elem ~ ("|" ~ ":"? ~ rel_type_elem)* }
+rel_type_elem = { ident_escaped | schema_name }
+range_literal = { "*" ~ ((".." ~ integer_literal?) | (integer_literal ~ (".." ~ integer_literal?)?))? }
+
+// ----- Properties -------------------------------------------
+properties       = { map_literal }
+map_literal      = { "{" ~ (map_entry ~ ("," ~ map_entry)*)? ~ "}" }
+map_entry        = { prop_name ~ ":" ~ expression }
+prop_name        = { ident_escaped | schema_name }
+
+// ----- Parameters -------------------------------------------
+parameter        = @{ "$" ~ (ident | integer_literal) }
+legacy_parameter = @{ "{" ~ (ident | integer_literal) ~ "}" }
+
+// ----- Expressions (precedence ladder, lowest to highest) ---
+expression       = { or_expr }
+or_expr          = { xor_expr  ~ (kw_OR  ~ xor_expr)* }
+xor_expr         = { and_expr  ~ (kw_XOR ~ and_expr)* }
+and_expr         = { not_expr  ~ (kw_AND ~ not_expr)* }
+// Multiple NOT is valid per the spec
+not_expr         = { kw_NOT ~ not_expr | comparison_expr }
+
+comparison_expr  = { add_sub_expr ~ comparison_suffix* }
+comparison_suffix = { comp_op ~ comparison_expr
+                    | regex_op ~ add_sub_expr
+                    | kw_IS ~ kw_NOT ~ kw_NULL
+                    | kw_IS ~ kw_NULL
+                    | kw_NOT ~ kw_IN ~ add_sub_expr
+                    | kw_IN ~ add_sub_expr
+                    | kw_STARTS ~ kw_WITH ~ add_sub_expr
+                    | kw_ENDS   ~ kw_WITH ~ add_sub_expr
+                    | kw_CONTAINS ~ add_sub_expr }
+regex_op         = { "=~" }
+comp_op          = { "=" | "<>" | "<=" | ">=" | "<" | ">" }
+
+add_sub_expr     = { mul_div_expr ~ (add_sub_op ~ mul_div_expr)* }
+add_sub_op       = { "+" | "-" }
+mul_div_expr     = { power_expr ~ (mul_div_op ~ power_expr)* }
+mul_div_op       = { "*" | "/" | "%" }
+power_expr       = { unary_expr ~ ("^" ~ unary_expr)* }
+
+// Unary + and - (spec: UnaryAddOrSubtractExpression)
+unary_expr       = { unary_minus | unary_plus | non_arith_expr }
+unary_minus      = { "-" ~ unary_expr }
+unary_plus       = { "+" ~ unary_expr }
+
+// Non-arithmetic: atom + postfix ops + optional label check
+// Spec: NonArithmeticOperatorExpression = Atom (ListOp | PropertyLookup)* [NodeLabels]
+non_arith_expr   = { atom ~ (property_lookup | slice_access | subscript_access)* ~ node_labels? }
+property_lookup  = { "." ~ prop_name }
+slice_access     = { "[" ~ expression? ~ ".." ~ expression? ~ "]" }
+subscript_access = { "[" ~ expression ~ "]" }
+
+// ----- Atom -------------------------------------------------
+atom = { float_literal
+       | hex_integer_literal
+       | octal_integer_literal
+       | integer_literal
+       | string_literal
+       | boolean_literal
+       | null_literal
+       | parameter
+       | legacy_parameter
+       | aggregate_expr
+       | case_expression
+       | reduce_expr
+       | exists_subquery
+       | shortest_path_atom
+       | quantifier_expr
+       | pattern_comprehension
+       | list_comprehension
+       | list_literal
+       | map_literal
+       | function_call
+       | label_check
+       | pattern_predicate
+       | "(" ~ expression ~ ")"
+       | variable }
+
+// CASE [expr] WHEN e THEN e ... [ELSE e] END
+case_expression   = { kw_CASE ~ expression? ~ case_when+ ~ (kw_ELSE ~ expression)? ~ kw_END }
+case_when         = { kw_WHEN ~ expression ~ kw_THEN ~ expression }
+
+// REDUCE(acc = init, var IN list | expr)
+reduce_expr       = { kw_REDUCE ~ "(" ~ variable ~ "=" ~ expression ~ "," ~ variable ~ kw_IN ~ expression ~ "|" ~ expression ~ ")" }
+
+// EXISTS { pattern [WHERE expr] }  or  EXISTS { regularQuery }
+exists_subquery   = { kw_EXISTS ~ "{" ~ (statement | (pattern_list ~ where_clause?)) ~ "}" }
+
+// shortestPath / allShortestPaths as expression atoms
+shortest_path_atom = { (kw_SHORTEST_PATH | kw_ALL_SHORTEST_PATHS) ~ "(" ~ pattern_element ~ ")" }
+
+// Quantifiers
+filter_expression = { variable ~ kw_IN ~ expression ~ (kw_WHERE ~ expression)? }
+quantifier_expr   = { (kw_ALL | kw_ANY | kw_NONE | kw_SINGLE) ~ "(" ~ filter_expression ~ ")" }
+
+// List comprehension: [var IN list [WHERE pred] [| expr]]
+list_comprehension = { "[" ~ filter_expression ~ ("|" ~ expression)? ~ "]" }
+
+// Pattern comprehension: [ [var =] RelPatternWithChain [WHERE pred] | expr ]
+pattern_comprehension = { "[" ~ (variable ~ "=")? ~ relationships_pattern ~ (kw_WHERE ~ expression)? ~ "|" ~ expression ~ "]" }
+// A relationship pattern requires at least one chain link (differs from plain pattern_element)
+relationships_pattern = { node_pattern ~ pattern_element_chain+ }
+
+// Function call: simple or namespaced (apoc.text.join, etc.)
+// Placed after aggregate_expr so agg functions are not re-matched here.
+function_call     = { func_name ~ "(" ~ (kw_DISTINCT? ~ expression ~ ("," ~ expression)*)? ~ ")" }
+func_name         = @{ (ident ~ ".")* ~ ident }
+
+// Aggregate function calls — must appear before function_call in atom
+aggregate_expr    = { count_expr | agg_call_expr }
+count_expr        = { kw_COUNT ~ "(" ~ (count_star | (kw_DISTINCT? ~ expression)) ~ ")" }
+count_star        = { "*" }
+agg_call_expr     = { agg_func_name ~ "(" ~ kw_DISTINCT? ~ expression ~ ")" }
+agg_func_name     = { kw_SUM | kw_AVG | kw_MIN | kw_MAX | kw_COLLECT }
+
+// Label check in expression context: var:Label or var:A:B
+label_check       = { variable ~ node_labels }
+
+// Pattern predicate: existence check via inline path (needs a chain link)
+pattern_predicate  = { relationships_pattern }
+
+// ----- Literals ---------------------------------------------
+boolean_literal       = { kw_TRUE | kw_FALSE }
+null_literal          = { kw_NULL }
+hex_integer_literal   = @{ ("0x" | "0X") ~ ASCII_HEX_DIGIT+ }
+octal_integer_literal = @{ ("0o" | "0O") ~ ASCII_OCT_DIGIT+ }
+integer_literal       = @{ ASCII_DIGIT+ }
+float_literal         = @{ ASCII_DIGIT* ~ "." ~ ASCII_DIGIT+ ~ (^"e" ~ ("+" | "-")? ~ ASCII_DIGIT+)?
+                          | ASCII_DIGIT+ ~ ^"e" ~ ("+" | "-")? ~ ASCII_DIGIT+ }
+string_literal        = @{ "\"" ~ double_str_char* ~ "\""
+                          | "'"  ~ single_str_char* ~ "'"  }
+double_str_char       = { escape_seq | (!("\"" | "\\") ~ ANY) }
+single_str_char       = { escape_seq | (!("'"  | "\\") ~ ANY) }
+escape_seq            = { "\\" ~ (
+    "\\"
+  | "'"
+  | "\""
+  | "b"
+  | "f"
+  | "n"
+  | "r"
+  | "t"
+  | ("u" ~ ASCII_HEX_DIGIT{4})
+  | ("U" ~ ASCII_HEX_DIGIT{8})
+) }
+list_literal          = { "[" ~ (expression ~ ("," ~ expression)*)? ~ "]" }

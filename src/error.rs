@@ -31,3 +31,16 @@ pub enum PolygraphError {
     #[error("Result mapping error: {message}")]
     ResultMapping { message: String },
 }
+
+impl From<opencypher_parser::ParseError> for PolygraphError {
+    fn from(e: opencypher_parser::ParseError) -> Self {
+        match e {
+            opencypher_parser::ParseError::Syntax { span, message } => {
+                PolygraphError::Parse { span, message }
+            }
+            opencypher_parser::ParseError::UnsupportedFeature { feature } => {
+                PolygraphError::UnsupportedFeature { feature }
+            }
+        }
+    }
+}

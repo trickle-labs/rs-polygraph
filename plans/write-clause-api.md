@@ -1,7 +1,7 @@
 # Write-Clause Public API — End-to-End Read/Write openCypher & ISO GQL on SPARQL Triplestores
 
-**Status**: planned
-**Updated**: 2026-05-06
+**Status**: complete
+**Updated**: 2026-05-07
 **Target version**: v0.7.1
 
 ---

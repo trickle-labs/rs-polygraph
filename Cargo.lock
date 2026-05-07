@@ -987,6 +987,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d6790f58c7ff633d8771f42965289203411a5e5c68388703c06e14f24770b41e"
 
 [[package]]
+name = "opencypher-parser"
+version = "0.1.0"
+dependencies = [
+ "pest",
+ "pest_derive",
+ "thiserror",
+]
+
+[[package]]
 name = "oxigraph"
 version = "0.5.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1281,10 +1290,11 @@ dependencies = [
 
 [[package]]
 name = "polygraph"
-version = "0.8.1"
+version = "0.9.0"
 dependencies = [
  "criterion",
  "cucumber",
+ "opencypher-parser",
  "oxigraph",
  "pest",
  "pest_derive",

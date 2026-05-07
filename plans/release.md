@@ -1,7 +1,7 @@
 # Release Plan — CI, Publishing, and Documentation
 
-**Status**: planned
-**Updated**: 2026-05-04
+**Status**: complete
+**Updated**: 2026-05-07
 
 This plan covers the infrastructure work needed to ship `polygraph` as a
 production-grade crate on crates.io: GitHub Actions CI, automated publishing,
