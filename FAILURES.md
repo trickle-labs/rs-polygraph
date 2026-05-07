@@ -304,13 +304,14 @@ Ordered by (passes unlocked) / (effort days):
 
 Every scenario that routes through the legacy translator is a blocker for
 **Phase 8.7** (delete `src/translator/`). The LQA path returns
-`Err(Unsupported)` for 571 scenario executions across three fallback
+`Err(Unsupported)` for 570 scenario executions across three fallback
 classes. Instrument with `POLYGRAPH_TRACE_LEGACY=1 cargo test --test tck`.
 
 **Recent progress** (2026-06-07):
 - `ListSlice` (15 events) → **eliminated** (compile-time fold implemented)
 - `list/map equality with null elements` (47→3) → **reduced by 44** (TriBool fold)
 - `list IN with null elements` (16→0) → **eliminated** (TriBool fold)
+- `Subscript` on WITH-bound list var (8→6) → **reduced by 2** (scalar_list_exprs lookup)
 
 ### Class A — LQA compile-time `Unsupported`  *(415 events)*
 
@@ -329,7 +330,7 @@ Fix track: extend `crates/polygraph/src/lqa/sparql.rs`.
 | `duration()` constructor | 11 | L1 | Port duration literal constructor |
 | `Exists` expression type | 9 | L1 | Port EXISTS subquery in `sparql.rs` |
 | `list concatenation with dynamic operands` | 8 | L2 | Runtime list concat |
-| `Subscript` expression type | 8 | L1 | Implement `list[idx]` subscript in `sparql.rs` |
+| `Subscript` expression type | 6 | L1 | Implement `list[idx]` subscript in `sparql.rs` (2 eliminated via scalar_list_exprs) |
 | `property access on scalar variable (var=nonMap)` | 6 | L1 | TypeError guard; return null for non-map/non-graph |
 | `property access on scalar variable (var=nonGraphElement)` | 6 | L1 | TypeError guard |
 | `collect()` aggregate | 6 | L2 | Runtime aggregate materialisation |
