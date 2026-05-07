@@ -458,18 +458,27 @@ fn op_to_where_parts(op: &Op, base: &str) -> Result<Vec<String>, PolygraphError>
         // to update (SPARQL UPDATE has no LIMIT/SKIP concept).
         Op::OrderBy { inner, .. } | Op::Distinct { inner, .. } => op_to_where_parts(inner, base),
 
-        // Projection (WITH clause): only transparent if all items are identity passthroughs
-        // (no renames, no expressions). Simple variable renames like `WITH n AS a` appear
-        // to be handleable via BIND, but CREATE after a rename introduces new nodes that
-        // the RETURN-clause SELECT (run post-INSERT) would also pick up, giving wrong row
-        // counts.  Keep the conservative all-passthrough gate until SELECT-before-INSERT
-        // ordering is implemented.
+        // Projection (WITH clause): handle identity passthroughs and simple variable
+        // renames (e.g. `WITH n AS a`).  Both cases can be expressed in SPARQL via
+        // BIND:  non-rename passthroughs need no BIND; renames add `BIND(?src AS ?alias)`.
+        // Projections containing computed expressions (e.g. `WITH n.name AS x`) are
+        // not yet supported and fall back to legacy.
         Op::Projection { inner, items, .. } => {
-            let all_passthrough = items.iter().all(|pi| {
-                matches!(&pi.expr, crate::lqa::Expr::Variable { name, .. } if *name == pi.alias)
-            });
-            if all_passthrough {
-                op_to_where_parts(inner, base)
+            // Check whether all items are plain variable expressions (passthrough or rename).
+            let all_variable_items = items
+                .iter()
+                .all(|pi| matches!(&pi.expr, crate::lqa::Expr::Variable { .. }));
+            if all_variable_items {
+                let mut parts = op_to_where_parts(inner, base)?;
+                // Emit BIND clauses for every non-identity rename: `WITH n AS a` → `BIND(?n AS ?a)`.
+                for pi in items {
+                    if let crate::lqa::Expr::Variable { name: src, .. } = &pi.expr {
+                        if src != &pi.alias {
+                            parts.push(format!("BIND(?{src} AS ?{})", pi.alias));
+                        }
+                    }
+                }
+                Ok(parts)
             } else {
                 Err(write_unsupported!("write_where_complex_op"))
             }
@@ -788,6 +797,24 @@ fn compile_create(
             found
         })
         .collect();
+
+    // Safety check: if the WHERE clause uses BIND-based variable renames (e.g. from
+    // `WITH n AS a`) AND this CREATE would insert new blank nodes that are NOT pre-existing
+    // in the match context, the post-INSERT SELECT in RETURN-clause queries would find those
+    // new blank nodes through the original MATCH condition, producing wrong row counts.
+    // Detect this and fall back to legacy so the correct result is returned.
+    let has_bind_renames = where_parts.iter().any(|p| p.starts_with("BIND("));
+    if has_bind_renames {
+        let creates_new_nodes = nodes.iter().any(|n| {
+            n.variable
+                .as_deref()
+                .map(|v| !bound_in_where.contains(v))
+                .unwrap_or(true) // anonymous node (no variable) → always new
+        });
+        if creates_new_nodes {
+            return Err(write_unsupported!("write_where_complex_op"));
+        }
+    }
 
     let mut insert_triples: Vec<String> = Vec::new();
 
