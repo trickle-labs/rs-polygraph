@@ -2364,7 +2364,8 @@ impl Compiler {
                             // e.g. `WITH [1,2,3] AS list RETURN list[1..2]`
                             if let Expr::List(items) = &pi.expr {
                                 if items.iter().all(lqa_is_full_literal) {
-                                    self.scalar_list_exprs.insert(pi.alias.clone(), items.clone());
+                                    self.scalar_list_exprs
+                                        .insert(pi.alias.clone(), items.clone());
                                 }
                             }
                             // Track temporal-typed variables for date/time arithmetic.
@@ -2628,15 +2629,21 @@ impl Compiler {
                             let e = self.eval_const_int(args.get(1)?)?;
                             let step = if let Some(st) = args.get(2) {
                                 let n = self.eval_const_int(st)?;
-                                if n == 0 { return None; }
+                                if n == 0 {
+                                    return None;
+                                }
                                 n
-                            } else { 1 };
+                            } else {
+                                1
+                            };
                             let mut out = Vec::new();
                             let mut i = s;
                             while (step > 0 && i <= e) || (step < 0 && i >= e) {
                                 out.push(i);
                                 i += step;
-                                if out.len() > 100_000 { return None; }
+                                if out.len() > 100_000 {
+                                    return None;
+                                }
                             }
                             Some(out)
                         });
@@ -3889,6 +3896,20 @@ impl Compiler {
                         // ordinalDay, dayOfQuarter) via BIND chain.
                         if let Some(spar) = self.lower_temporal_jdn_property(name, key) {
                             return Ok(spar);
+                        }
+                        // Property access on a non-temporal scalar literal: TypeError.
+                        // If scalar_lit_vals[name] is set (bound from a literal) but
+                        // temporal_type_vars[name] is NOT set, the variable holds a
+                        // non-temporal value (integer, float, boolean, or plain string).
+                        // Accessing any property on it is always a TypeError in Cypher.
+                        if self.scalar_lit_vals.contains_key(name.as_str())
+                            && !self.temporal_type_vars.contains_key(name.as_str())
+                        {
+                            return Err(PolygraphError::Translation {
+                                message: format!(
+                                    "property access .{key} on non-temporal scalar `{name}`: TypeError"
+                                ),
+                            });
                         }
                         return Err(PolygraphError::Unsupported {
                             construct: format!(
@@ -5641,10 +5662,7 @@ impl Compiler {
                     let is_tostring = inner_name.eq_ignore_ascii_case("tostring")
                         || inner_name.eq_ignore_ascii_case("string");
                     if is_tostring {
-                        if let Some(Expr::Variable {
-                            name: v_name, ..
-                        }) = inner_args.first()
-                        {
+                        if let Some(Expr::Variable { name: v_name, .. }) = inner_args.first() {
                             if let Some(s) = self.scalar_lit_vals.get(v_name.as_str()).cloned() {
                                 let folded = Expr::Literal(Literal::String(s));
                                 return self.lower_function_call(name, &[folded]);
@@ -7197,7 +7215,11 @@ fn lit_cmp_tri(a: &Expr, b: &Expr) -> TriBool {
                     TriBool::True => {}
                 }
             }
-            if has_null { TriBool::Null } else { TriBool::True }
+            if has_null {
+                TriBool::Null
+            } else {
+                TriBool::True
+            }
         }
         // List vs. non-list or vice-versa → false.
         (Expr::List(_), _) | (_, Expr::List(_)) => TriBool::False,
@@ -7219,7 +7241,11 @@ fn lit_cmp_tri(a: &Expr, b: &Expr) -> TriBool {
                     TriBool::True => {}
                 }
             }
-            if has_null { TriBool::Null } else { TriBool::True }
+            if has_null {
+                TriBool::Null
+            } else {
+                TriBool::True
+            }
         }
         // Map vs. non-map → false.
         (Expr::Map(_), _) | (_, Expr::Map(_)) => TriBool::False,
@@ -7259,7 +7285,11 @@ fn try_fold_in_null(needle: &Expr, haystack: &[Expr]) -> Option<TriBool> {
             TriBool::False => {}
         }
     }
-    Some(if potential_null { TriBool::Null } else { TriBool::False })
+    Some(if potential_null {
+        TriBool::Null
+    } else {
+        TriBool::False
+    })
 }
 
 fn lqa_serialize_literal(e: &Expr) -> Option<String> {
