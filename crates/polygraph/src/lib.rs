@@ -604,13 +604,21 @@ fn lqa_safe_reason(ast: &ast::CypherQuery) -> Option<&'static str> {
                                             if let Some(PatternElement::Node(ep)) =
                                                 pattern.elements.get(ep_idx)
                                             {
-                                                let unlabeled = ep.labels.is_empty();
+                                                // A node is "constrained" if it has a label,
+                                                // inline property predicates, or is already
+                                                // bound from a previous clause.
+                                                let unconstrained_label = ep.labels.is_empty();
+                                                let unconstrained_props = ep
+                                                    .properties
+                                                    .as_ref()
+                                                    .map(|p| p.is_empty())
+                                                    .unwrap_or(true);
                                                 let unbound = ep
                                                     .variable
                                                     .as_deref()
                                                     .map(|v| !bound_vars.contains(v))
                                                     .unwrap_or(true);
-                                                if unlabeled && unbound {
+                                                if unconstrained_label && unconstrained_props && unbound {
                                                     return Some("unbounded_varlen_unlabeled");
                                                 }
                                             }

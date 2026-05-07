@@ -316,9 +316,18 @@ fn quantifier_canonical(
 /// opaque list variable.  Returns `Some(bool)` if the expression is always
 /// that constant regardless of which elements the opaque list contains;
 /// returns `None` if the result depends on actual list values.
+///
+/// `nonempty_vars` — list variables proven non-empty by a preceding
+/// `WITH var WHERE size(var) > 0` filter.  When a variable is in this set,
+/// additional tautologies that depend on non-emptiness apply:
+///   - none(true, L)   = false   (L non-empty ⇒ at least one True match)
+///   - any(true, L)    = true    (L non-empty ⇒ at least one True match)
+///   - single(true, L) = None    (depends on size)
+///   - all(false, L)   = false   (L non-empty ⇒ at least one False match)
 fn eval_quantifier_tautology(
     expr: &crate::ast::cypher::Expression,
     opaque_vars: &std::collections::HashSet<String>,
+    nonempty_vars: &std::collections::HashSet<String>,
 ) -> Option<bool> {
     use crate::ast::cypher::{Expression, QuantifierKind};
 
@@ -332,19 +341,32 @@ fn eval_quantifier_tautology(
         } => {
             if matches!(list.as_ref(), Expression::Variable(v) if opaque_vars.contains(v.as_str()))
             {
+                let list_nonempty = matches!(list.as_ref(),
+                    Expression::Variable(v) if nonempty_vars.contains(v.as_str()));
                 match try_eval_bool_const(pred) {
                     Some(Some(false)) => {
                         return match kind {
                             QuantifierKind::None => Some(true),    // none(F) = true ∀L
                             QuantifierKind::Any => Some(false),    // any(F)  = false ∀L
                             QuantifierKind::Single => Some(false), // single(F) = false ∀L
-                            QuantifierKind::All => None, // all(F) depends on list being non-empty
+                            // all(F, L) = false when L non-empty; None otherwise
+                            QuantifierKind::All => {
+                                if list_nonempty { Some(false) } else { None }
+                            }
                         };
                     }
                     Some(Some(true)) => {
                         return match kind {
                             QuantifierKind::All => Some(true), // all(T) = true ∀L (vacuously)
-                            _ => None, // none(T)/any(T) depend on list emptiness
+                            // none(T, L) = false when L non-empty; None otherwise
+                            QuantifierKind::None => {
+                                if list_nonempty { Some(false) } else { None }
+                            }
+                            // any(T, L) = true when L non-empty; None otherwise
+                            QuantifierKind::Any => {
+                                if list_nonempty { Some(true) } else { None }
+                            }
+                            QuantifierKind::Single => None, // depends on size even if non-empty
                         };
                     }
                     _ => {}
@@ -365,11 +387,11 @@ fn eval_quantifier_tautology(
             None
         }
         // Boolean combinations
-        Expression::Not(inner) => eval_quantifier_tautology(inner, opaque_vars).map(|b| !b),
+        Expression::Not(inner) => eval_quantifier_tautology(inner, opaque_vars, nonempty_vars).map(|b| !b),
         Expression::And(a, b) => {
             match (
-                eval_quantifier_tautology(a, opaque_vars),
-                eval_quantifier_tautology(b, opaque_vars),
+                eval_quantifier_tautology(a, opaque_vars, nonempty_vars),
+                eval_quantifier_tautology(b, opaque_vars, nonempty_vars),
             ) {
                 (Some(true), Some(true)) => Some(true),
                 (Some(false), _) | (_, Some(false)) => Some(false),
@@ -378,8 +400,8 @@ fn eval_quantifier_tautology(
         }
         Expression::Or(a, b) => {
             match (
-                eval_quantifier_tautology(a, opaque_vars),
-                eval_quantifier_tautology(b, opaque_vars),
+                eval_quantifier_tautology(a, opaque_vars, nonempty_vars),
+                eval_quantifier_tautology(b, opaque_vars, nonempty_vars),
             ) {
                 (Some(true), _) | (_, Some(true)) => Some(true),
                 (Some(false), Some(false)) => Some(false),
@@ -391,6 +413,37 @@ fn eval_quantifier_tautology(
 }
 
 // ── End Q1 helpers ────────────────────────────────────────────────────────────
+
+/// Scan a WHERE expression for `size(var) > 0` or `size(var) >= 1` patterns
+/// and add the variable name to `nonempty_vars`.
+fn collect_nonempty_vars(
+    expr: &crate::ast::cypher::Expression,
+    nonempty_vars: &mut std::collections::HashSet<String>,
+) {
+    use crate::ast::cypher::{CompOp, Expression, Literal};
+    match expr {
+        Expression::Comparison(lhs, op, rhs) => {
+            // size(var) > 0  or  size(var) >= 1
+            let (size_arg, cmp_op, rhs_val) = (lhs.as_ref(), op, rhs.as_ref());
+            if let Expression::FunctionCall { name, args, .. } = size_arg {
+                if name.eq_ignore_ascii_case("size") {
+                    if let Some(Expression::Variable(v)) = args.first() {
+                        let gt_zero = matches!(cmp_op, CompOp::Gt) && matches!(rhs_val, Expression::Literal(Literal::Integer(0)));
+                        let ge_one  = matches!(cmp_op, CompOp::Ge) && matches!(rhs_val, Expression::Literal(Literal::Integer(1)));
+                        if gt_zero || ge_one {
+                            nonempty_vars.insert(v.clone());
+                        }
+                    }
+                }
+            }
+        }
+        Expression::And(a, b) => {
+            collect_nonempty_vars(a, nonempty_vars);
+            collect_nonempty_vars(b, nonempty_vars);
+        }
+        _ => {}
+    }
+}
 
 /// Compare two Cypher literal expressions using Cypher's ascending type ordering.
 ///
@@ -1554,6 +1607,8 @@ impl TranslationState {
 
         // ── Step 1: Build opaque list variable set ────────────────────────────
         let mut opaque_vars: std::collections::HashSet<String> = std::collections::HashSet::new();
+        // Variables guaranteed to be non-empty (due to `WHERE size(var) > 0` filters).
+        let mut nonempty_vars: std::collections::HashSet<String> = std::collections::HashSet::new();
         for clause in clauses {
             if let Clause::With(w) = clause {
                 let items = match &w.items {
@@ -1566,6 +1621,10 @@ impl TranslationState {
                             opaque_vars.insert(alias.clone());
                         }
                     }
+                }
+                // Detect `WITH list WHERE size(list) > 0` — marks `list` as non-empty.
+                if let Some(filter) = &w.where_ {
+                    collect_nonempty_vars(&filter.expression, &mut nonempty_vars);
                 }
             }
         }
@@ -1614,7 +1673,7 @@ impl TranslationState {
                 continue; // aggregates are fine to skip
             }
             let alias = item.alias.as_deref().unwrap_or("ret");
-            match eval_quantifier_tautology(&item.expression, &opaque_vars) {
+            match eval_quantifier_tautology(&item.expression, &opaque_vars, &nonempty_vars) {
                 Some(b) => {
                     alias_to_const.insert(alias.to_string(), b);
                 }
@@ -1647,7 +1706,7 @@ impl TranslationState {
             let alias = ret_item.alias.as_deref().unwrap_or("ret");
             let b = match &ret_item.expression {
                 Expression::Variable(v) => alias_to_const.get(v.as_str()).copied()?,
-                other => eval_quantifier_tautology(other, &opaque_vars)?,
+                other => eval_quantifier_tautology(other, &opaque_vars, &nonempty_vars)?,
             };
             let var = Variable::new_unchecked(alias.to_string());
             let gt = GroundTerm::Literal(SparLit::new_typed_literal(
@@ -1677,7 +1736,8 @@ impl TranslationState {
             Clause::With(w) => {
                 if let ReturnItems::Explicit(items) = &w.items {
                     items.iter().any(
-                        |it| matches!(&it.expression, Expression::List(lst) if !lst.is_empty()),
+                        |it| matches!(&it.expression, Expression::List(lst) if !lst.is_empty()) ||
+                             it.alias.as_deref().is_some_and(|a| nonempty_vars.contains(a)),
                     )
                 } else {
                     false

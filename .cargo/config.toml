@@ -1,0 +1,4 @@
+[env]
+# Absolute path so the TCK runner finds features/ regardless of which
+# sub-crate the test binary is running from.
+POLYGRAPH_TCK_FEATURES_DIR = { value = "tests/tck/features", relative = true }

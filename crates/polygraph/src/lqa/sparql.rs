@@ -2597,7 +2597,25 @@ impl Compiler {
                 } else if let Expr::FunctionCall { name, args, .. } = list {
                     // UNWIND range(start, end [, step]) AS var — expand at compile time.
                     if name.eq_ignore_ascii_case("range") {
-                        if let Some(items) = eval_range_to_integers(args) {
+                        // Try pure literal evaluation first, then const_int_vars.
+                        let items = eval_range_to_integers(args).or_else(|| {
+                            let s = self.eval_const_int(args.first()?)?;
+                            let e = self.eval_const_int(args.get(1)?)?;
+                            let step = if let Some(st) = args.get(2) {
+                                let n = self.eval_const_int(st)?;
+                                if n == 0 { return None; }
+                                n
+                            } else { 1 };
+                            let mut out = Vec::new();
+                            let mut i = s;
+                            while (step > 0 && i <= e) || (step < 0 && i >= e) {
+                                out.push(i);
+                                i += step;
+                                if out.len() > 100_000 { return None; }
+                            }
+                            Some(out)
+                        });
+                        if let Some(items) = items {
                             let inner_pat = self.lower_op(inner)?;
                             let var = Self::var(variable);
                             if items.is_empty() {
@@ -4443,6 +4461,29 @@ impl Compiler {
                 let items = match list.as_ref() {
                     Expr::List(items) => items,
                     _ => {
+                        // ── Tautology fold (runtime list) ────────────────────────────
+                        // If the predicate is statically true or false, some quantifier
+                        // kinds yield a constant result regardless of list content.
+                        if let Some(const_val) = try_eval_bool_const_lqa(predicate) {
+                            match (kind, const_val) {
+                                // none(F, L) = true  for any L (including empty)
+                                (QuantKind::None, Some(false)) => return Ok(Self::lit_bool(true)),
+                                // any(F, L) = false  for any L
+                                (QuantKind::Any, Some(false)) => return Ok(Self::lit_bool(false)),
+                                // single(F, L) = false for any L
+                                (QuantKind::Single, Some(false)) => {
+                                    return Ok(Self::lit_bool(false))
+                                }
+                                // all(T, L) = true for any L (vacuously true even for empty)
+                                (QuantKind::All, Some(true)) => return Ok(Self::lit_bool(true)),
+                                // all(null, L) = null propagation
+                                (QuantKind::All, None) => {}
+                                // Other combos (none(T), any(T), all(F), single(T)) depend on
+                                // list size — cannot fold without runtime info.
+                                _ => {}
+                            }
+                        }
+
                         return Err(PolygraphError::Unsupported {
                             construct: "Quantifier over non-constant list".into(),
                             spec_ref: "openCypher 9 §6.3.4".into(),
@@ -4647,6 +4688,45 @@ impl Compiler {
                             )),
                             vec![list_expr],
                         ));
+                    }
+                }
+                // Literal-list expansion: evaluate compile-time.
+                if let Expr::List(items) = list.as_ref() {
+                    let mut results: Vec<String> = Vec::new();
+                    let mut all_ok = true;
+                    for item in items {
+                        // Apply predicate filter if present.
+                        if let Some(pred) = predicate {
+                            let subst = subst_var(pred, variable.as_str(), item);
+                            match try_eval_bool_const_lqa(&subst) {
+                                Some(Some(true)) => {}          // passes filter
+                                Some(Some(false)) | Some(None) => continue, // filtered or null
+                                None => {
+                                    all_ok = false;
+                                    break;
+                                }
+                            }
+                        }
+                        if let Some(proj) = projection {
+                            let subst = subst_var(proj, variable.as_str(), item);
+                            if let Some(s) = lqa_lit_elem_str(&subst) {
+                                results.push(s);
+                            } else {
+                                all_ok = false;
+                                break;
+                            }
+                        } else {
+                            if let Some(s) = lqa_lit_elem_str(item) {
+                                results.push(s);
+                            } else {
+                                all_ok = false;
+                                break;
+                            }
+                        }
+                    }
+                    if all_ok {
+                        let serialized = format!("[{}]", results.join(", "));
+                        return Ok(SparExpr::Literal(SparLit::new_simple_literal(serialized)));
                     }
                 }
                 Err(PolygraphError::Unsupported {
@@ -5370,10 +5450,41 @@ impl Compiler {
             // When bounds are constant integers (or compile-time const vars),
             // expand to a serialized list string "[s, s+1, …, e]".
             "range" => {
+                // First try the free-function evaluator (pure literals / arithmetic).
                 if let Some(items) = eval_range_to_integers(args) {
                     let parts: Vec<String> = items.iter().map(|n| n.to_string()).collect();
                     let s = format!("[{}]", parts.join(", "));
                     return Ok(SparExpr::Literal(SparLit::new_simple_literal(s)));
+                }
+                // Second try: use const_int_vars to resolve WITH-bound integer variables.
+                // e.g. `WITH 5 AS n  RETURN range(0, n-1)` → "[0, 1, 2, 3, 4]"
+                {
+                    let start = args.first().and_then(|a| self.eval_const_int(a));
+                    let end_val = args.get(1).and_then(|a| self.eval_const_int(a));
+                    let step: Option<i64> = if let Some(step_arg) = args.get(2) {
+                        self.eval_const_int(step_arg)
+                    } else {
+                        Some(1)
+                    };
+                    if let (Some(s), Some(e), Some(step)) = (start, end_val, step) {
+                        if step != 0 {
+                            let mut items = Vec::new();
+                            let mut i = s;
+                            let mut guard = 0usize;
+                            while (step > 0 && i <= e) || (step < 0 && i >= e) {
+                                items.push(i.to_string());
+                                i += step;
+                                guard += 1;
+                                if guard > 100_000 {
+                                    break; // safety cap; fall through to legacy
+                                }
+                            }
+                            if guard <= 100_000 {
+                                let s_out = format!("[{}]", items.join(", "));
+                                return Ok(SparExpr::Literal(SparLit::new_simple_literal(s_out)));
+                            }
+                        }
+                    }
                 }
                 Err(PolygraphError::Unsupported {
                     construct: "range()".into(),
@@ -6848,6 +6959,31 @@ fn eval_range_to_integers(args: &[Expr]) -> Option<Vec<i64>> {
         }
     }
     Some(items)
+}
+
+/// Evaluate a constant boolean `Expr`. Returns `Some(Some(bool))` if the expression
+/// is statically known, `Some(None)` for null, or `None` if it cannot be determined
+/// at compile time.
+fn try_eval_bool_const_lqa(e: &Expr) -> Option<Option<bool>> {
+    match e {
+        Expr::Literal(Literal::Boolean(b)) => Some(Some(*b)),
+        Expr::Literal(Literal::Null) => Some(None),
+        Expr::Not(inner) => match try_eval_bool_const_lqa(inner)? {
+            Some(b) => Some(Some(!b)),
+            None => Some(None),
+        },
+        Expr::And(a, b) => match (try_eval_bool_const_lqa(a), try_eval_bool_const_lqa(b)) {
+            (Some(Some(false)), _) | (_, Some(Some(false))) => Some(Some(false)),
+            (Some(Some(true)), Some(Some(true))) => Some(Some(true)),
+            _ => None,
+        },
+        Expr::Or(a, b) => match (try_eval_bool_const_lqa(a), try_eval_bool_const_lqa(b)) {
+            (Some(Some(true)), _) | (_, Some(Some(true))) => Some(Some(true)),
+            (Some(Some(false)), Some(Some(false))) => Some(Some(false)),
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 fn lqa_lit_elem_str(e: &Expr) -> Option<String> {

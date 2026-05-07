@@ -1,114 +1,104 @@
 ---
 name: release-polygraph
-description: "Release workflow for rs-polygraph. Use when: cutting a release, bumping the version, publishing to crates.io, preparing a release commit and tag."
-argument-hint: "new version number, e.g. 0.7.0"
+description: "Release workflow for rs-polygraph. Use when: cutting a release, bumping the version, preparing a release commit and tag."
+argument-hint: "new version number, e.g. 0.9.0"
 ---
 
 # rs-polygraph Release Workflow
 
-## When to Use
+Three crates live in this workspace, each with its own independent version:
 
-- Cutting a new release of the `polygraph` crate
-- Bumping the version (patch, minor, or major)
-- Preparing a release commit and tag
-- Publishing to crates.io
+| Crate | Cargo.toml | Notes |
+|---|---|---|
+| `polygraph` | `crates/polygraph/Cargo.toml` | Main transpiler — the primary release target |
+| `opencypher-parser` | `crates/opencypher-parser/Cargo.toml` | Parser sub-crate — bump when its public API changes |
+| `polygraph-difftest` | `polygraph-difftest/Cargo.toml` | `publish = false` — never released, version is irrelevant |
 
----
-
-## Files That Must Be Updated
-
-| File | Field | Notes |
-|------|-------|-------|
-| `Cargo.toml` | `version` under `[package]` | The single source of truth |
-| `polygraph-difftest/Cargo.toml` | `polygraph` path-dep version | Update if it pins a version |
-| `CHANGELOG.md` | New section at the top | Follow the existing heading format |
+A normal release only requires bumping `crates/polygraph/Cargo.toml`. Bump `opencypher-parser` separately only when its own API or grammar changes.
 
 ---
 
-## Release Procedure
+## Steps
 
-### 1. Determine the new version
+### 1. Check ROADMAP.md
 
-Follow semantic versioning:
-- **Patch** (`0.x.y`): bug fixes, no API changes
-- **Minor** (`0.x.0`): new public API, backward-compatible
-- **Major** (`x.0.0`): breaking API changes (rare before 1.0)
+Confirm the new version aligns with the next planned milestone before deciding on a patch / minor / major bump.
 
-### 2. Update `Cargo.toml`
+### 2. Run the full test suite
 
-In the root `Cargo.toml`, change:
+```bash
+cargo fmt --check
+cargo clippy -- -D warnings
+cargo test --lib
+cargo test --test tck        # slow, mandatory
+cargo test -p polygraph-difftest
+cargo doc --no-deps
+```
+
+All must pass with zero warnings. Do not proceed if anything fails.
+
+### 3. Update `Cargo.toml` and `CHANGELOG.md`
+
+In `crates/polygraph/Cargo.toml` (and `crates/opencypher-parser/Cargo.toml` if its API changed):
 ```toml
 [package]
 version = "<NEW>"
 ```
 
-### 3. Update `CHANGELOG.md`
-
-Add a new section at the top following this format:
-
+Add a section at the top of `CHANGELOG.md`:
 ```markdown
 ## [<NEW>] — <YYYY-MM-DD> — <Title>
 
-<One-paragraph summary of what changed and why it matters.>
+<One-paragraph summary.>
 
-### Added
-- ...
-
-### Fixed
-- ...
-
-### Changed
+### Added / Fixed / Changed / Removed
 - ...
 ```
 
-### 4. Run the full test suite
-
+Verify the version is correct:
 ```bash
-cargo fmt --check
-cargo clippy -- -D warnings
-cargo test
-cargo test --test tck
-cargo test -p polygraph-difftest
-cargo doc --no-deps
+grep "^version" crates/polygraph/Cargo.toml crates/opencypher-parser/Cargo.toml
 ```
 
-All must pass with zero warnings and zero failures.
-
-### 5. Dry-run publish
+### 4. Commit, tag, and push
 
 ```bash
-cargo publish --dry-run
-```
-
-Verify the crate package looks correct (no accidentally included large files).
-
-### 6. Commit, tag, and push
-
-```bash
-git add Cargo.toml CHANGELOG.md
+git add crates/polygraph/Cargo.toml crates/opencypher-parser/Cargo.toml CHANGELOG.md
 git commit -m "Release v<NEW>"
 git tag v<NEW>
 git push && git push --tags
 ```
 
-The `release.yml` workflow will trigger on the tag, run CI again, and publish
-to crates.io automatically. Monitor it at:
-`https://github.com/trickle-labs/rs-polygraph/actions`
+### 5. Create the GitHub release
 
-### 7. Verify publication
+Go to [github.com/BaardBouvet/rs-polygraph/releases/new](https://github.com/BaardBouvet/rs-polygraph/releases/new):
+- **Tag**: `v<NEW>`
+- **Title**: `v<NEW> — <Title from CHANGELOG>`
+- **Description**: paste the new CHANGELOG section (body only, no heading)
 
-- crates.io: `https://crates.io/crates/polygraph`
-- docs.rs: `https://docs.rs/polygraph/<NEW>`
+### 6. Publishing (automatic)
 
-docs.rs builds asynchronously — allow a few minutes.
+The `.github/workflows/release.yml` workflow triggers automatically when the tag is pushed. It will:
+
+1. Validate the tag matches `crates/polygraph/Cargo.toml` version
+2. Run the full CI suite
+3. Publish `opencypher-parser` and `polygraph` to crates.io
+
+Monitor progress at: `https://github.com/BaardBouvet/rs-polygraph/actions/workflows/release.yml`
+
+Once the workflow completes (usually 10–15 minutes), both crates will be live on crates.io:
+- `https://crates.io/crates/opencypher-parser`
+- `https://crates.io/crates/polygraph`
 
 ---
 
-## Common Mistakes
+## Rollback
 
-- Forgetting to update `CHANGELOG.md` before tagging.
-- Tagging before all CI jobs pass (`cargo clippy` is the most common failure).
-- Publishing when `cargo publish --dry-run` shows test/fixture files that bloat
-  the download — add them to `exclude` in `Cargo.toml` first.
-- Bumping only one of multiple `Cargo.toml` files in the workspace (check
-  `polygraph-difftest/Cargo.toml` if it pins the parent version).
+If something goes wrong after pushing the tag:
+
+```bash
+git tag -d v<NEW>
+git push --delete origin v<NEW>
+```
+
+Then delete the GitHub release if it was created. Note: **If the CI workflow completed and published to crates.io, you cannot unpublish.** You'll need to yank the version on crates.io manually and prepare a patch release instead.
