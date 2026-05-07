@@ -3,6 +3,34 @@
 All notable changes to `polygraph` are documented here.  
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.8.0] — 2025-08-01 — Result hydration API
+
+### Added
+- **`output.map_results(&solutions)`** — callers convert raw SPARQL result rows
+  (`Vec<SparqlSolution>`) back into openCypher-shaped `Vec<CypherRow>` without
+  writing any SPARQL-awareness in calling code.
+- **`SparqlSolution` / `RdfTerm`** — engine-agnostic input types.  Callers
+  convert from their native SPARQL engine type before calling `map_results`.
+- **`CypherValue`** — full openCypher type hierarchy (`Null`, `Boolean`,
+  `Integer`, `Float`, `String`, `List`, `Map`, `Node`, `Relationship`).
+- **`ProjectionSchema` / `ColumnKind`** — automatically built by the translator
+  (LQA path) alongside the SPARQL string; classifies each RETURN column as
+  `Scalar`, `Node`, or `Relationship`, preserving aliases.
+- **XSD datatype conversion** (`src/result_mapping/xsd.rs`) — maps
+  `xsd:integer`, `xsd:double`, `xsd:float`, `xsd:boolean`, `xsd:string`, plain
+  literals, IRIs, and blank nodes to the correct `CypherValue` variant.
+- **10 integration tests** (`tests/integration/result_mapping.rs`) covering
+  schema generation (scalar, node, aliased, distinct, multiple columns,
+  aggregate) and end-to-end scalar result mapping (integer, null, empty).
+
+### Fixed
+- LQA compiler now correctly classifies projected node variables as
+  `ColumnKind::Node { iri_var }` instead of `ColumnKind::Scalar`.  Previously
+  `RETURN n` and `RETURN a, b` with node variables produced Scalar entries in
+  the schema, causing callers to receive IRIs as strings instead of
+  `CypherNode` values.  Relationship variables are likewise classified as
+  `ColumnKind::Relationship`.
+
 ## [0.7.1] — 2025-08-01 — Write-clause public API
 
 ### Added

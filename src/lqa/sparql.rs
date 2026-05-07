@@ -1293,7 +1293,34 @@ impl Compiler {
                                 ),
                             });
                         }
-                        self.projected_columns.push(scalar_col(name.clone()));
+                        let col_name = pi
+                            .display_name
+                            .as_deref()
+                            .unwrap_or(name.as_str())
+                            .to_owned();
+                        let kind = if self.scan_vars.contains(name.as_str()) {
+                            if let Some(ev) = self.edge_vars.get(name.as_str()) {
+                                let type_info = match &ev.pred {
+                                    EdgePred::Static(nn) => nn.as_str().to_owned(),
+                                    EdgePred::Dynamic(v) => v.as_str().to_owned(),
+                                };
+                                ColumnKind::Relationship {
+                                    src_var: ev.subj.clone(),
+                                    dst_var: ev.obj.clone(),
+                                    type_info,
+                                }
+                            } else {
+                                ColumnKind::Node {
+                                    iri_var: name.clone(),
+                                }
+                            }
+                        } else {
+                            ColumnKind::Scalar { var: name.clone() }
+                        };
+                        self.projected_columns.push(ProjectedColumn {
+                            name: col_name,
+                            kind,
+                        });
                         continue;
                     }
                 }
