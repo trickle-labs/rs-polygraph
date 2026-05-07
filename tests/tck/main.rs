@@ -2479,6 +2479,15 @@ async fn executing_query_inner(world: &mut TckWorld, step: &Step) {
                     oxigraph::model::NamedNode::new_unchecked("http://www.w3.org/2001/XMLSchema#boolean"),
                 )))
             },
+        )
+        .with_custom_function(
+            oxigraph::model::NamedNode::new_unchecked("urn:polygraph:list-map-lower"),
+            |args| {
+                use oxigraph::model::Term as OxTerm;
+                let list = match args.first()? { OxTerm::Literal(l) => l.value().to_owned(), _ => return None };
+                let result = polygraph::translator::cypher::list_map_lower_str(&list);
+                Some(OxTerm::Literal(oxigraph::model::Literal::new_simple_literal(result)))
+            },
         ),
     ) {
         Err(e) => {

@@ -4609,7 +4609,6 @@ impl Compiler {
             }
 
             Expr::ListSlice { .. }
-            | Expr::ListComprehension { .. }
             | Expr::PatternComprehension { .. }
             | Expr::Reduce { .. }
             | Expr::Aggregate { .. } => Err(PolygraphError::Unsupported {
@@ -4622,6 +4621,34 @@ impl Compiler {
                     "complex expression not yet fully handled in LQA path; legacy fallback applies"
                         .into(),
             }),
+
+            Expr::ListComprehension {
+                variable,
+                list,
+                predicate,
+                projection,
+            } => {
+                // Special case: [x IN list | toLower(x)]
+                // → urn:polygraph:list-map-lower(list_expr)
+                if let (None, Some(proj)) = (predicate, projection) {
+                    if is_tolower_proj(proj, variable) {
+                        let list_expr = self.lower_expr(list)?;
+                        return Ok(SparExpr::FunctionCall(
+                            Function::Custom(NamedNode::new_unchecked(
+                                "urn:polygraph:list-map-lower",
+                            )),
+                            vec![list_expr],
+                        ));
+                    }
+                }
+                Err(PolygraphError::Unsupported {
+                    construct: "list comprehension [x IN list WHERE pred | expr] (Phase C)".into(),
+                    spec_ref: "openCypher 9 §6.3.3".into(),
+                    reason:
+                        "list comprehension over runtime lists requires engine extension"
+                            .into(),
+                })
+            }
 
             Expr::Parameter(name) => Err(PolygraphError::Unsupported {
                 construct: format!("parameter ${name}"),
@@ -6823,6 +6850,18 @@ fn lqa_lit_elem_str(e: &Expr) -> Option<String> {
 fn arg_err(name: &str) -> PolygraphError {
     PolygraphError::UnsupportedFeature {
         feature: format!("{name}() requires an argument"),
+    }
+}
+
+/// Returns true if `proj` is `toLower(variable)` (the list-map-lower pattern).
+fn is_tolower_proj(proj: &Expr, variable: &str) -> bool {
+    match proj {
+        Expr::FunctionCall { name, args, .. } => {
+            name.eq_ignore_ascii_case("toLower")
+                && args.len() == 1
+                && matches!(&args[0], Expr::Variable { name: v, .. } if v == variable)
+        }
+        _ => false,
     }
 }
 

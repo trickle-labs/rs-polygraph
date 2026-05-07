@@ -1880,6 +1880,66 @@ pub fn list_contains_str(list: &str, value: &str) -> bool {
     false
 }
 
+/// Apply `toLower` to each string element of a Cypher list string.
+/// Example: `"['B', 'C']"` → `"['b', 'c']"`.
+/// Non-string elements (numbers, booleans) pass through unchanged.
+pub fn list_map_lower_str(list: &str) -> String {
+    let inner = match list
+        .strip_prefix('[')
+        .and_then(|s| s.strip_suffix(']'))
+    {
+        Some(s) => s,
+        None => return "[]".to_owned(),
+    };
+    if inner.is_empty() {
+        return "[]".to_owned();
+    }
+    // Parse elements using the same depth/quote logic as list_contains_str.
+    let bytes = inner.as_bytes();
+    let n = bytes.len();
+    let mut depth: i32 = 0;
+    let mut in_quote = false;
+    let mut item_start = 0usize;
+    let mut i = 0usize;
+    let mut elements: Vec<&str> = Vec::new();
+    loop {
+        let at_sep = !in_quote
+            && depth == 0
+            && i + 1 < n
+            && bytes[i] == b','
+            && bytes[i + 1] == b' ';
+        if at_sep || i == n {
+            elements.push(&inner[item_start..i]);
+            if at_sep {
+                item_start = i + 2;
+                i += 2;
+                continue;
+            } else {
+                break;
+            }
+        }
+        match bytes[i] {
+            b'[' | b'{' if !in_quote => depth += 1,
+            b']' | b'}' if !in_quote => depth -= 1,
+            b'\'' if !in_quote => in_quote = true,
+            b'\'' if in_quote => in_quote = false,
+            _ => {}
+        }
+        i += 1;
+    }
+    let lowered: Vec<String> = elements
+        .into_iter()
+        .map(|elem| {
+            if let Some(s) = elem.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')) {
+                format!("'{}'", s.to_lowercase())
+            } else {
+                elem.to_owned()
+            }
+        })
+        .collect();
+    format!("[{}]", lowered.join(", "))
+}
+
 /// Add two ISO 8601 duration strings and return the result.
 /// Returns `None` if either string is not a valid duration.
 /// Carries ns→seconds→minutes→hours (but NOT hours→days or months→years).
