@@ -1,8 +1,8 @@
 # TCK Failure Reference
 
-**Updated**: 2026-06-07  
+**Updated**: 2026-06-08  
 **Baseline**: 3787 / 3828 passing (98.9 %), **41 failing**.  
-**Legacy fallbacks**: ~571 scenario executions still route through the legacy translator — goal is zero (see Phase 8.7).  
+**Legacy fallbacks**: ~494 scenario executions still route through the legacy translator — goal is zero (see Phase 8.7).  
 **Target**: ≥ 3790 (≥ 99 %) — see [plans/l2-runtime-support.md](plans/l2-runtime-support.md).
 
 This file is the authoritative, searchable reference for every currently-failing
