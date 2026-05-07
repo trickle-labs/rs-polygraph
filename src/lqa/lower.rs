@@ -572,6 +572,31 @@ impl AstLowerer {
                         _ => None,
                     };
                     let expr = self.lower_expr(&item.expression)?;
+                    // Special case: size([x IN collect(something) WHERE x <> null]).
+                    // In Cypher, `x <> null` is always null/false, so the list
+                    // comprehension always returns []. size([]) = 0.
+                    // We fold the entire expression to 0 and inject a dummy count(*)
+                    // aggregate so that GROUP BY still produces exactly one row when
+                    // the input is empty (matching `count(*) = 0` semantics).
+                    if is_size_null_ne_listcomp(&expr) {
+                        let dummy_alias = format!("_dummy_agg_{gen_counter}");
+                        gen_counter += 1;
+                        aggs.push(AggItem {
+                            expr: Expr::Aggregate {
+                                kind: AggKind::CountStar,
+                                distinct: false,
+                                arg: None,
+                            },
+                            alias: dummy_alias,
+                        });
+                        post_group_aliases.push(alias.clone());
+                        proj.push(ProjItem {
+                            expr: Expr::Literal(Literal::Integer(0)),
+                            alias,
+                            display_name,
+                        });
+                        continue;
+                    }
                     // Check if this expression is/wraps an aggregate (directly or nested).
                     if matches!(expr, Expr::Aggregate { .. }) {
                         // Emit as an aggregate: bind the agg expr to the alias.
@@ -1584,6 +1609,40 @@ fn lower_literal(l: &ast::Literal) -> Literal {
     }
 }
 
+/// Returns `true` when `expr` matches the pattern
+/// `size([x IN <anything> WHERE x <> null])`.
+///
+/// In Cypher, `x <> null` always evaluates to `null` (falsy), so the list
+/// comprehension always returns `[]` and `size([]) = 0`.  This pattern most
+/// commonly appears as `size([x IN collect(r) WHERE x <> null])` where the
+/// goal is to count non-null values — but since `collect()` already strips
+/// nulls, the filter is semantically a no-op while syntactically confusing.
+fn is_size_null_ne_listcomp(expr: &Expr) -> bool {
+    if let Expr::FunctionCall { name, args, .. } = expr {
+        if name.eq_ignore_ascii_case("size") && args.len() == 1 {
+            if let Expr::ListComprehension { variable, predicate: Some(pred), projection: None, .. } = &args[0] {
+                return is_null_ne_pred_lqa(pred, variable);
+            }
+        }
+    }
+    false
+}
+
+/// Returns `true` when `pred` is `variable <> null` or `null <> variable`
+/// (in LQA IR form).
+fn is_null_ne_pred_lqa(pred: &Expr, variable: &str) -> bool {
+    match pred {
+        Expr::Comparison(CmpOp::Ne, a, b) => {
+            let var_null = matches!(a.as_ref(), Expr::Variable { name: v, .. } if v == variable)
+                && matches!(b.as_ref(), Expr::Literal(Literal::Null));
+            let null_var = matches!(a.as_ref(), Expr::Literal(Literal::Null))
+                && matches!(b.as_ref(), Expr::Variable { name: v, .. } if v == variable);
+            var_null || null_var
+        }
+        _ => false,
+    }
+}
+
 /// Extract GROUP BY keys from a projection list: variables that are NOT
 /// themselves aggregate-output aliases.
 ///
@@ -1714,6 +1773,11 @@ fn expr_contains_aggregate(expr: &Expr) -> bool {
             branches.iter().any(|(w, t)| expr_contains_aggregate(w) || expr_contains_aggregate(t))
                 || else_expr.as_ref().map_or(false, |e| expr_contains_aggregate(e))
         }
+        Expr::ListComprehension { list, predicate, projection, .. } => {
+            expr_contains_aggregate(list)
+                || predicate.as_ref().map_or(false, |p| expr_contains_aggregate(p))
+                || projection.as_ref().map_or(false, |p| expr_contains_aggregate(p))
+        }
         _ => false,
     }
 }
@@ -1760,6 +1824,14 @@ fn extract_nested_aggregates(expr: Expr, aggs: &mut Vec<AggItem>, counter: &mut 
             distinct,
             args: args.into_iter().map(|a| extract_nested_aggregates(a, aggs, counter)).collect(),
         },
+        Expr::ListComprehension { variable, list, predicate, projection } => {
+            Expr::ListComprehension {
+                variable,
+                list: Box::new(extract_nested_aggregates(*list, aggs, counter)),
+                predicate: predicate.map(|p| Box::new(extract_nested_aggregates(*p, aggs, counter))),
+                projection: projection.map(|p| Box::new(extract_nested_aggregates(*p, aggs, counter))),
+            }
+        }
         _ => expr,
     }
 }

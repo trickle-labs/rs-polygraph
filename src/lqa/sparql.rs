@@ -4810,6 +4810,24 @@ impl Compiler {
                     }
                     _ => {}
                 }
+                // Special case: size([x IN list WHERE x <> null]) → 0
+                // In Cypher, any comparison with null evaluates to null (falsy),
+                // so the predicate `x <> null` is always null/false and the list
+                // comprehension always returns []. size([]) = 0.
+                // The inner `list` may contain an aggregate (collect(r)) which has
+                // already been extracted by extract_nested_aggregates, so we just
+                // return the integer literal 0 here.
+                if let Expr::ListComprehension {
+                    variable,
+                    predicate: Some(pred),
+                    projection: None,
+                    ..
+                } = arg
+                {
+                    if is_null_ne_pred(pred, variable) {
+                        return Ok(Self::lit_integer(0));
+                    }
+                }
                 let a = self.lower_expr(arg)?;
                 Ok(SparExpr::FunctionCall(Function::StrLen, vec![a]))
             }
@@ -6854,6 +6872,25 @@ fn arg_err(name: &str) -> PolygraphError {
 }
 
 /// Returns true if `proj` is `toLower(variable)` (the list-map-lower pattern).
+/// Returns `true` when `pred` is a null-inequality comparison on `variable`:
+/// i.e. `variable <> null` or `null <> variable`.  In Cypher, any comparison
+/// with `null` evaluates to `null` (falsy), so a list comprehension filtered
+/// by this predicate always returns an empty list.
+fn is_null_ne_pred(pred: &Expr, variable: &str) -> bool {
+    match pred {
+        Expr::Comparison(CmpOp::Ne, a, b) => {
+            let var_null_pattern =
+                matches!(a.as_ref(), Expr::Variable { name: v, .. } if v == variable)
+                    && matches!(b.as_ref(), Expr::Literal(Literal::Null));
+            let null_var_pattern =
+                matches!(a.as_ref(), Expr::Literal(Literal::Null))
+                    && matches!(b.as_ref(), Expr::Variable { name: v, .. } if v == variable);
+            var_null_pattern || null_var_pattern
+        }
+        _ => false,
+    }
+}
+
 fn is_tolower_proj(proj: &Expr, variable: &str) -> bool {
     match proj {
         Expr::FunctionCall { name, args, .. } => {
