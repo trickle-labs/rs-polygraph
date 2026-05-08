@@ -201,6 +201,11 @@ struct Compiler {
     /// Stores the element expressions so that `list[a..b]` and `list[i]` can be
     /// constant-folded at compile time.
     scalar_list_exprs: HashMap<String, Vec<Expr>>,
+    /// For single-hop any-type named paths, maps path_var → (pred_var, sparql_subj_var,
+    /// sparql_obj_var).  Used to implement path equality comparison (`p1 = p2`)
+    /// in `lower_expr` without needing to project path variables as SPARQL values.
+    /// Only populated for non-undirected, non-varlen expansions with no rel_types.
+    path_anon_pred_vars: HashMap<String, (Variable, Variable, Variable)>,
     /// For `collect()` aggregates: maps output alias → raw GROUP_CONCAT variable.
     /// After the GROUP pattern, each entry is used to emit
     /// `BIND(CONCAT("[", COALESCE(?raw, ""), "]") AS ?alias)`.
@@ -239,6 +244,7 @@ impl Compiler {
             list_size_vars: HashMap::new(),
             scalar_map_exprs: HashMap::new(),
             scalar_list_exprs: HashMap::new(),
+            path_anon_pred_vars: HashMap::new(),
             collect_post_wraps: Vec::new(),
             collect_group_binds: Vec::new(),
         }
@@ -1977,6 +1983,43 @@ impl Compiler {
                             EdgePred::Dynamic(pred_var.clone()),
                             to.to_string(),
                         ));
+                    }
+                    // For single-hop any-type named paths, record the SPARQL-order
+                    // (pred_var, sparql_subj, sparql_obj) so path equality can be compiled.
+                    // Only supported for directed (non-undirected) expansions.
+                    if let Some(pvar) = path_var.as_deref() {
+                        if range.is_none() && !matches!(direction, Direction::Undirected) {
+                            let sparql_pair_opt: Option<(Variable, Variable)> = match direction {
+                                Direction::Outgoing => {
+                                    if let (
+                                        TermPattern::Variable(sv),
+                                        TermPattern::Variable(ov),
+                                    ) = (&from_tp, &to_tp)
+                                    {
+                                        Some((sv.clone(), ov.clone()))
+                                    } else {
+                                        None
+                                    }
+                                }
+                                Direction::Incoming => {
+                                    if let (
+                                        TermPattern::Variable(sv),
+                                        TermPattern::Variable(ov),
+                                    ) = (&to_tp, &from_tp)
+                                    {
+                                        Some((sv.clone(), ov.clone()))
+                                    } else {
+                                        None
+                                    }
+                                }
+                                _ => None,
+                            };
+                            if let Some((s, o)) = sparql_pair_opt {
+                                self.path_anon_pred_vars
+                                    .entry(pvar.to_string())
+                                    .or_insert((pred_var.clone(), s, o));
+                            }
+                        }
                     }
                     self.lower_expand_any_type(from_tp, pred_var, to_tp, direction)
                 } else if rel_types_dedup.len() == 1 {
@@ -4395,6 +4438,52 @@ impl Compiler {
                                 return Ok(SparExpr::Exists(Box::new(GraphPattern::Bgp {
                                     patterns: vec![triple],
                                 })));
+                            }
+                        }
+                    }
+                }
+                // Path equality: if both operands are single-hop any-type named path
+                // variables, compare the underlying SPARQL triples directly.
+                // This implements Cypher path equality semantics where direction of
+                // traversal does not affect identity — two paths are equal iff they
+                // consist of the same sequence of graph elements.
+                if matches!(op, CmpOp::Eq | CmpOp::Ne) {
+                    if let (Expr::Variable { name: v1, .. }, Expr::Variable { name: v2, .. }) =
+                        (a.as_ref(), b.as_ref())
+                    {
+                        let p1_len = self.path_lengths.get(v1.as_str()).copied();
+                        let p2_len = self.path_lengths.get(v2.as_str()).copied();
+                        if matches!((p1_len, p2_len), (Some(1), Some(1))) {
+                            let info1 = self.path_anon_pred_vars.get(v1.as_str()).cloned();
+                            let info2 = self.path_anon_pred_vars.get(v2.as_str()).cloned();
+                            if let (
+                                Some((pred1, subj1, obj1)),
+                                Some((pred2, subj2, obj2)),
+                            ) = (info1, info2)
+                            {
+                                // p1 = p2 iff they use the same triple:
+                                // (subj1 = subj2) AND (pred1 = pred2) AND (obj1 = obj2)
+                                let eq_expr = SparExpr::And(
+                                    Box::new(SparExpr::And(
+                                        Box::new(SparExpr::Equal(
+                                            Box::new(SparExpr::Variable(subj1)),
+                                            Box::new(SparExpr::Variable(subj2)),
+                                        )),
+                                        Box::new(SparExpr::Equal(
+                                            Box::new(SparExpr::Variable(pred1)),
+                                            Box::new(SparExpr::Variable(pred2)),
+                                        )),
+                                    )),
+                                    Box::new(SparExpr::Equal(
+                                        Box::new(SparExpr::Variable(obj1)),
+                                        Box::new(SparExpr::Variable(obj2)),
+                                    )),
+                                );
+                                return Ok(if matches!(op, CmpOp::Ne) {
+                                    SparExpr::Not(Box::new(eq_expr))
+                                } else {
+                                    eq_expr
+                                });
                             }
                         }
                     }

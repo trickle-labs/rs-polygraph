@@ -1,10 +1,10 @@
 # L2 Runtime Support — Roadmap to Full TCK Compliance
 
 **Status**: in progress
-**Updated**: 2026-06-09
+**Updated**: 2026-06-10
 **Baseline**: 3757 / 3828 scenarios pass (98.1 %), 71 failed.
-**Current**: 3788 / 3828 scenarios pass (98.9 %), 40 failing — first Continuation emitter landed (Set1[5] fixed).
-**Target**: ≥ 99 % pass + skipped categories collapsed.
+**Current**: 3790 / 3828 scenarios pass (99.0 %), 38 failing — Comparison1[14] path equality + WithOrderBy1[45] list comparison sort key fixed.
+**Target**: ≥ 99.3 % pass + skipped categories collapsed.
 
 This plan describes how to close the remaining gap between the static
 transpiler and the openCypher TCK by introducing **L2 (multi-phase) runtime

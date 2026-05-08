@@ -2492,6 +2492,63 @@ impl TranslationState {
                         });
                     }
                 }
+                // Sort-key based comparison for list/map literals vs variables that have
+                // a parallel sort-key column (from UNWIND of a list-of-lists).
+                // When comparing a list literal against such a variable, use the sort key
+                // for correct Cypher ordering instead of SPARQL string comparison.
+                if matches!(op, CompOp::Lt | CompOp::Le | CompOp::Gt | CompOp::Ge) {
+                    match (lhs.as_ref(), rhs.as_ref()) {
+                        (
+                            Expression::List(_) | Expression::Map(_),
+                            Expression::Variable(rv),
+                        ) => {
+                            if let Some(sk_name) =
+                                self.list_sort_key_vars.get(rv.as_str()).cloned()
+                            {
+                                let lhs_sk = sort_key_for_expr(lhs);
+                                let l = SparExpr::Literal(SparLit::new_simple_literal(lhs_sk));
+                                let r =
+                                    SparExpr::Variable(Variable::new_unchecked(sk_name));
+                                return Ok(match op {
+                                    CompOp::Lt => SparExpr::Less(Box::new(l), Box::new(r)),
+                                    CompOp::Le => {
+                                        SparExpr::LessOrEqual(Box::new(l), Box::new(r))
+                                    }
+                                    CompOp::Gt => SparExpr::Greater(Box::new(l), Box::new(r)),
+                                    CompOp::Ge => {
+                                        SparExpr::GreaterOrEqual(Box::new(l), Box::new(r))
+                                    }
+                                    _ => unreachable!(),
+                                });
+                            }
+                        }
+                        (
+                            Expression::Variable(lv),
+                            Expression::List(_) | Expression::Map(_),
+                        ) => {
+                            if let Some(sk_name) =
+                                self.list_sort_key_vars.get(lv.as_str()).cloned()
+                            {
+                                let rhs_sk = sort_key_for_expr(rhs);
+                                let l =
+                                    SparExpr::Variable(Variable::new_unchecked(sk_name));
+                                let r = SparExpr::Literal(SparLit::new_simple_literal(rhs_sk));
+                                return Ok(match op {
+                                    CompOp::Lt => SparExpr::Less(Box::new(l), Box::new(r)),
+                                    CompOp::Le => {
+                                        SparExpr::LessOrEqual(Box::new(l), Box::new(r))
+                                    }
+                                    CompOp::Gt => SparExpr::Greater(Box::new(l), Box::new(r)),
+                                    CompOp::Ge => {
+                                        SparExpr::GreaterOrEqual(Box::new(l), Box::new(r))
+                                    }
+                                    _ => unreachable!(),
+                                });
+                            }
+                        }
+                        _ => {}
+                    }
+                }
                 let l = self.translate_expr(lhs, extra)?;
                 let r = self.translate_expr(rhs, extra)?;
                 let result = match op {

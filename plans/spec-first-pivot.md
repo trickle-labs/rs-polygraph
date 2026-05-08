@@ -1,7 +1,7 @@
 # Spec-First Pivot — From TCK-Driven Patches to Semantics-Driven Translation
 
 **Status**: in progress
-**Updated**: 2026-06-09 (Phase L2 active: infrastructure complete, first Continuation emitter landed (Set1[5] fixed). TCK 3788/3828; difftest 232/232)
+**Updated**: 2026-06-10 (Phase L2 active: Comparison1[14] path equality + WithOrderBy1[45] list comparison sort key fixed. TCK 3790/3828; difftest 232/232)
 
 This plan replaces the project's *de facto* methodology — "find the next failing
 TCK scenario, patch the translator until it passes" — with a spec-anchored,

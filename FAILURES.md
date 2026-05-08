@@ -1,9 +1,9 @@
 # TCK Failure Reference
 
-**Updated**: 2026-06-09  
-**Baseline**: 3788 / 3828 passing (98.9 %), **40 failing**.  
+**Updated**: 2026-06-10  
+**Baseline**: 3790 / 3828 passing (99.0 %), **38 failing**.  
 **Legacy fallbacks**: ~494 scenario executions still route through the legacy translator — goal is zero (see Phase 8.7).  
-**Target**: ≥ 3790 (≥ 99 %) — see [plans/l2-runtime-support.md](plans/l2-runtime-support.md).
+**Target**: ≥ 3800 (≥ 99.3 %) — see [plans/l2-runtime-support.md](plans/l2-runtime-support.md).
 
 This file is the authoritative, searchable reference for every currently-failing
 TCK scenario. Organised by failure bucket; each entry records the feature file
@@ -120,7 +120,7 @@ the comprehension list — path decomposition is required (L2 §3.3).
 
 ---
 
-## Bucket O — Heterogeneous ordering  *(3 failures)*
+## Bucket O — Heterogeneous ordering  *(4 failures)*
 
 **L-level**: L1  
 **Design doc**: [plans/l2-runtime-support.md §3.4](plans/l2-runtime-support.md)  
@@ -136,13 +136,13 @@ Cypher sorts by type-rank then element-wise. A sort-key column trick
 | [ReturnOrderBy1.feature](tests/tck/features/clauses/return-orderby/ReturnOrderBy1.feature) | [12] ORDER BY DESC should order distinct types in expected order | Legacy only | Failing in legacy; LQA not reached |
 | [WithOrderBy1.feature](tests/tck/features/clauses/with-orderBy/WithOrderBy1.feature) | [21] Sort distinct types in ascending order | Legacy only | Failing in legacy; LQA not reached |
 | [WithOrderBy1.feature](tests/tck/features/clauses/with-orderBy/WithOrderBy1.feature) | [22] Sort distinct types in descending order | Legacy only | Failing in legacy; LQA not reached |
-| [WithOrderBy1.feature](tests/tck/features/clauses/with-orderBy/WithOrderBy1.feature) | [45] Sort order consistent with comparisons — lists example | Legacy only | Failing in legacy; LQA not reached |
+| ~~[WithOrderBy1.feature](tests/tck/features/clauses/with-orderBy/WithOrderBy1.feature)~~ | ~~[45] Sort order consistent with comparisons — lists example~~ | ~~Legacy only~~ | **FIXED** (2026-06-10): sort-key substitution in list literal comparisons (`translate_expr` in `mod.rs`) |
 
 **Note**: [21]/[22] `UNWIND [n, r, p, 1.5, …]` mix graph entities with scalars;
 ordering graph entities requires stable IRI-based comparison, not available
-statically. [45] uses `[x IN values WHERE x < value]` where `values` is a
-WITH-bound literal list — the comparator `x < value` over list elements requires
-runtime evaluation.
+statically. ~~[45] uses `[x IN values WHERE x < value]` where `values` is a
+WITH-bound literal list — fixed by substituting the UNWIND sort-key column
+for the literal comparison operand.~~
 
 ---
 
@@ -236,13 +236,13 @@ result via VALUES block.
 as the grouping key; our GROUP BY emits `GROUP BY ?p_serialised` which deduplicates
 incorrectly when paths share the same string encoding.
 
-### Comparison1[14] — Path equality ignoring direction
+### ~~Comparison1[14] — Path equality ignoring direction~~  **FIXED**
 
-**L-level**: L2  
+**L-level**: L2 (previously) → **FIXED** (2026-06-10)  
 **Feature**: [Comparison1.feature](tests/tck/features/expressions/comparison/Comparison1.feature#L276)  
-**Error**: result set mismatch — `MATCH p1 = (a)-[r]->(b) MATCH p2 = (b)-[r]->(a)
-RETURN p1 = p2 AS result` — Cypher path equality is direction-agnostic;
-our encoding encodes direction, so `p1 ≠ p2`.
+**Fix**: Tracked SPARQL-order (pred_var, subj_var, obj_var) for single-hop any-type directed named paths in
+`path_anon_pred_vars` (in `lqa/sparql.rs`). Path equality is now compared triple-wise: `(subj1=subj2) AND (pred1=pred2) AND (obj1=obj2)`,
+which correctly treats direction-reversed paths as equal since both refer to the same triple.
 
 ### List11[3] — range() with runtime step
 
@@ -289,8 +289,10 @@ Ordered by (passes unlocked) / (effort days):
 | Priority | Bucket | Failures unlocked | Effort | Blocker |
 |----------|--------|:-----------------:|--------|---------|
 | — | **T1 / Temporal8** — duration arithmetic | ~~+7~~ Done | — | Closed |
-| 1 | **Q-b** — tautology fold (non-empty guard) | +3 done; +2 remain | ½ day | None |
-| 2 | **O** — heterogeneous sort key column (L1 static trick) | +5 | 2 days | None |
+| — | **Misc: Comparison1[14]** — path equality | ~~+1~~ Done | — | Closed |
+| — | **O: WithOrderBy1[45]** — list comparison sort key | ~~+1~~ Done | — | Closed |
+| 1 | **Q-b** — tautology fold (non-empty guard) | +3 done; Quantifier10[2]+Quantifier11[3]×5 remain | ½ day | None |
+| 2 | **O** — heterogeneous sort key (entity mixing) | +4 remain (ReturnOrderBy1[11,12], WithOrderBy1[21,22]) | 2 days | None |
 | 3 | **Misc: Temporal2[6]** — chrono-tz integration | +1 | 1 day | Dependency approval |
 | 4 | **Q-a** — quantifier on `nodes(p)` / `relationships(p)` | +8 | 1–2 weeks | L2 path decomposition |
 | 5 | **LC** — list comprehension on `collect()` result | +6 | 1–2 weeks | L2 Continuation API |
