@@ -1307,8 +1307,48 @@ fn expr_to_sparql_update_expr(expr: &Expr, var: &str, base: &str) -> Option<Stri
             let s = expr_to_sparql_update_expr(inner, var, base)?;
             Some(format!("(-{s})"))
         }
-        // Arithmetic
-        Expr::Add(a, b) => binary_op(a, b, "+", var, base),
+        // Arithmetic (and list concatenation)
+        Expr::Add(a, b) => {
+            // List concatenation: Property + constant list → splice strings.
+            // Lists are stored as plain string literals, e.g. "[1, 2, 3]".
+            // We use SPARQL CONCAT + SUBSTR to append/prepend the constant items.
+            if let (Expr::Property(pnode, pkey), Expr::List(items)) = (a.as_ref(), b.as_ref()) {
+                if let Expr::Variable { name: var_name, .. } = pnode.as_ref() {
+                    if let Some(ser) = lqa_write_serialize_literal(&Expr::List(items.clone())) {
+                        let cur = format!("?__{var_name}_{pkey}_cur");
+                        if items.is_empty() {
+                            return Some(cur);
+                        }
+                        // inner_b = content of the constant list without outer [ ]
+                        let inner_b = &ser[1..ser.len() - 1];
+                        // If the stored list is empty "[]" (length 2), result is just "[inner_b]".
+                        // Otherwise: strip trailing "]" of cur and append ", inner_b]".
+                        return Some(format!(
+                            "IF(STRLEN({cur}) = 2, \"[{inner_b}]\", CONCAT(SUBSTR({cur}, 1, STRLEN({cur})-1), \", {inner_b}]\"))"
+                        ));
+                    }
+                }
+            }
+            // List concatenation: constant list + Property → prepend constant items.
+            if let (Expr::List(items), Expr::Property(pnode, pkey)) = (a.as_ref(), b.as_ref()) {
+                if let Expr::Variable { name: var_name, .. } = pnode.as_ref() {
+                    if let Some(ser) = lqa_write_serialize_literal(&Expr::List(items.clone())) {
+                        let cur = format!("?__{var_name}_{pkey}_cur");
+                        if items.is_empty() {
+                            return Some(cur);
+                        }
+                        // inner_a = content of the constant list without outer [ ]
+                        let inner_a = &ser[1..ser.len() - 1];
+                        // If the stored list is empty "[]" (length 2), result is just "[inner_a]".
+                        // Otherwise: strip leading "[" of cur and prepend "[inner_a, ".
+                        return Some(format!(
+                            "IF(STRLEN({cur}) = 2, \"[{inner_a}]\", CONCAT(\"[{inner_a}, \", SUBSTR({cur}, 2)))"
+                        ));
+                    }
+                }
+            }
+            binary_op(a, b, "+", var, base)
+        }
         Expr::Sub(a, b) => binary_op(a, b, "-", var, base),
         Expr::Mul(a, b) => binary_op(a, b, "*", var, base),
         Expr::Div(a, b) => binary_op(a, b, "/", var, base),

@@ -4429,8 +4429,14 @@ impl Compiler {
                 // Guard: list/map equality/inequality when null is present differs from plain
                 // string comparison (null propagates in Cypher, but comparing the serialised
                 // strings "[null, x]" always gives a definite false/true).
+                // Only fire when at least one side is actually a List or Map expression;
+                // scalar comparisons with null (e.g. `expr = null`) fall through to the
+                // normal lowering path which handles null propagation via SPARQL unbound.
                 // Try compile-time fold first; fall back to legacy only for dynamic exprs.
+                let a_is_list_or_map = matches!(a.as_ref(), Expr::List(_) | Expr::Map(_));
+                let b_is_list_or_map = matches!(b.as_ref(), Expr::List(_) | Expr::Map(_));
                 if matches!(op, CmpOp::Eq | CmpOp::Ne)
+                    && (a_is_list_or_map || b_is_list_or_map)
                     && (lqa_expr_contains_null(a) || lqa_expr_contains_null(b))
                 {
                     if let Some(result) = try_fold_list_eq_null(a, b) {
