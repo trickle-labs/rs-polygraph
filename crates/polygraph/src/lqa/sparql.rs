@@ -2885,6 +2885,38 @@ impl Compiler {
                         spec_ref: "openCypher 9 §4.5".into(),
                         reason: "runtime list UNWIND requires legacy path".into(),
                     })
+                } else if let Expr::Variable { name: unwind_list_var, .. } = list {
+                    // UNWIND variable AS x — if the variable was bound to a constant list
+                    // in a previous WITH clause (stored in scalar_list_exprs), expand it.
+                    if let Some(items) = self.scalar_list_exprs.get(unwind_list_var.as_str()).cloned() {
+                        let inner_pat = self.lower_op(inner)?;
+                        let var = Self::var(variable);
+                        if items.is_empty() {
+                            return Ok(inner_pat);
+                        }
+                        let has_null = items
+                            .iter()
+                            .any(|i| matches!(i, Expr::Literal(crate::lqa::expr::Literal::Null)));
+                        let bindings = items
+                            .iter()
+                            .map(|item| literal_to_ground(item).map(|g| vec![g]))
+                            .collect::<Result<Vec<_>, _>>()?;
+                        if has_null {
+                            self.unwind_null_vars.insert(variable.clone());
+                        }
+                        self.scan_vars.insert(variable.clone());
+                        let values = GraphPattern::Values {
+                            variables: vec![var],
+                            bindings,
+                        };
+                        Ok(join(inner_pat, values))
+                    } else {
+                        Err(PolygraphError::Unsupported {
+                            construct: "UNWIND with variable/expression list in LQA path".into(),
+                            spec_ref: "openCypher 9 §4.5".into(),
+                            reason: "runtime list UNWIND requires legacy path".into(),
+                        })
+                    }
                 } else {
                     Err(PolygraphError::Unsupported {
                         construct: "UNWIND with variable/expression list in LQA path".into(),
@@ -4731,37 +4763,49 @@ impl Compiler {
             } => {
                 // Expand quantifiers over compile-time constant lists.
                 // For runtime lists (properties, variables) fall back to legacy.
-                let items = match list.as_ref() {
-                    Expr::List(items) => items,
+                // If the list is a variable bound to a constant in a previous WITH
+                // clause, resolve it via scalar_list_exprs before the fallback.
+                let resolved_items: Option<Vec<Expr>> = match list.as_ref() {
+                    Expr::Variable { name, .. } => {
+                        self.scalar_list_exprs.get(name.as_str()).cloned()
+                    }
+                    _ => None,
+                };
+                let items: &[Expr] = match list.as_ref() {
+                    Expr::List(items) => items.as_slice(),
                     _ => {
-                        // ── Tautology fold (runtime list) ────────────────────────────
-                        // If the predicate is statically true or false, some quantifier
-                        // kinds yield a constant result regardless of list content.
-                        if let Some(const_val) = try_eval_bool_const_lqa(predicate) {
-                            match (kind, const_val) {
-                                // none(F, L) = true  for any L (including empty)
-                                (QuantKind::None, Some(false)) => return Ok(Self::lit_bool(true)),
-                                // any(F, L) = false  for any L
-                                (QuantKind::Any, Some(false)) => return Ok(Self::lit_bool(false)),
-                                // single(F, L) = false for any L
-                                (QuantKind::Single, Some(false)) => {
-                                    return Ok(Self::lit_bool(false))
+                        if let Some(ref ri) = resolved_items {
+                            ri.as_slice()
+                        } else {
+                            // ── Tautology fold (runtime list) ────────────────────────────
+                            // If the predicate is statically true or false, some quantifier
+                            // kinds yield a constant result regardless of list content.
+                            if let Some(const_val) = try_eval_bool_const_lqa(predicate) {
+                                match (kind, const_val) {
+                                    // none(F, L) = true  for any L (including empty)
+                                    (QuantKind::None, Some(false)) => return Ok(Self::lit_bool(true)),
+                                    // any(F, L) = false  for any L
+                                    (QuantKind::Any, Some(false)) => return Ok(Self::lit_bool(false)),
+                                    // single(F, L) = false for any L
+                                    (QuantKind::Single, Some(false)) => {
+                                        return Ok(Self::lit_bool(false))
+                                    }
+                                    // all(T, L) = true for any L (vacuously true even for empty)
+                                    (QuantKind::All, Some(true)) => return Ok(Self::lit_bool(true)),
+                                    // all(null, L) = null propagation
+                                    (QuantKind::All, None) => {}
+                                    // Other combos (none(T), any(T), all(F), single(T)) depend on
+                                    // list size — cannot fold without runtime info.
+                                    _ => {}
                                 }
-                                // all(T, L) = true for any L (vacuously true even for empty)
-                                (QuantKind::All, Some(true)) => return Ok(Self::lit_bool(true)),
-                                // all(null, L) = null propagation
-                                (QuantKind::All, None) => {}
-                                // Other combos (none(T), any(T), all(F), single(T)) depend on
-                                // list size — cannot fold without runtime info.
-                                _ => {}
                             }
-                        }
 
-                        return Err(PolygraphError::Unsupported {
-                            construct: "Quantifier over non-constant list".into(),
-                            spec_ref: "openCypher 9 §6.3.4".into(),
-                            reason: "list must be a compile-time constant for LQA expansion; legacy fallback applies".into(),
-                        })
+                            return Err(PolygraphError::Unsupported {
+                                construct: "Quantifier over non-constant list".into(),
+                                spec_ref: "openCypher 9 §6.3.4".into(),
+                                reason: "list must be a compile-time constant for LQA expansion; legacy fallback applies".into(),
+                            })
+                        }
                     }
                 };
 
@@ -5036,8 +5080,19 @@ impl Compiler {
                         ));
                     }
                 }
+                // Resolve list: constant literal OR variable bound via WITH clause.
+                let resolved_lc_items: Option<Vec<Expr>> = match list.as_ref() {
+                    Expr::Variable { name, .. } => {
+                        self.scalar_list_exprs.get(name.as_str()).cloned()
+                    }
+                    _ => None,
+                };
+                let lc_items: Option<&[Expr]> = match list.as_ref() {
+                    Expr::List(items) => Some(items.as_slice()),
+                    _ => resolved_lc_items.as_deref(),
+                };
                 // Literal-list expansion: evaluate compile-time.
-                if let Expr::List(items) = list.as_ref() {
+                if let Some(items) = lc_items {
                     let mut results: Vec<String> = Vec::new();
                     let mut all_ok = true;
                     for item in items {
@@ -5259,6 +5314,43 @@ impl Compiler {
                 {
                     if is_null_ne_pred(pred, variable) {
                         return Ok(Self::lit_integer(0));
+                    }
+                }
+                // If the argument is a list comprehension that can be expanded
+                // at compile time (constant list), compute the element count directly
+                // rather than using StrLen on the serialized string (which would give
+                // the string byte length, not the element count).
+                if let Expr::ListComprehension { variable, list, predicate, projection: _ } = arg {
+                    // Resolve list items (constant or scalar_list_exprs variable).
+                    let resolved_size_items: Option<Vec<Expr>> = match list.as_ref() {
+                        Expr::Variable { name, .. } => {
+                            self.scalar_list_exprs.get(name.as_str()).cloned()
+                        }
+                        _ => None,
+                    };
+                    let size_items: Option<&[Expr]> = match list.as_ref() {
+                        Expr::List(items) => Some(items.as_slice()),
+                        _ => resolved_size_items.as_deref(),
+                    };
+                    if let Some(items) = size_items {
+                        // Count items that pass the predicate filter.
+                        let mut count: i64 = 0;
+                        let mut all_ok = true;
+                        for item in items {
+                            if let Some(pred) = predicate {
+                                let subst = subst_var(pred, variable.as_str(), item);
+                                match try_eval_bool_const_lqa(&subst) {
+                                    Some(Some(true)) => { count += 1; }
+                                    Some(Some(false)) | Some(None) => {}
+                                    None => { all_ok = false; break; }
+                                }
+                            } else {
+                                count += 1;
+                            }
+                        }
+                        if all_ok {
+                            return Ok(Self::lit_integer(count));
+                        }
                     }
                 }
                 let a = self.lower_expr(arg)?;
@@ -6938,8 +7030,36 @@ fn subst_var(expr: &Expr, var: &str, val: &Expr) -> Expr {
             expr: Box::new(subst_var(inner, var, val)),
             labels: labels.clone(),
         },
-        // For other complex variants (Aggregate, Quantifier, comprehensions, etc.)
-        // that are unlikely to appear inside a quantifier predicate, leave as-is.
+        // Quantifier: substitute in the list (outer scope) and in the predicate
+        // only when the quantifier's own binding variable does not shadow `var`.
+        E::Quantifier { kind, variable: qvar, list, predicate } => E::Quantifier {
+            kind: kind.clone(),
+            variable: qvar.clone(),
+            list: Box::new(subst_var(list, var, val)),
+            predicate: if qvar.as_str() == var {
+                // qvar shadows var inside the predicate — leave predicate unchanged.
+                predicate.clone()
+            } else {
+                Box::new(subst_var(predicate, var, val))
+            },
+        },
+        // ListComprehension: same shadowing rule.
+        E::ListComprehension { variable: lcvar, list, predicate, projection } => E::ListComprehension {
+            variable: lcvar.clone(),
+            list: Box::new(subst_var(list, var, val)),
+            predicate: if lcvar.as_str() == var {
+                predicate.clone()
+            } else {
+                predicate.as_deref().map(|p| Box::new(subst_var(p, var, val)))
+            },
+            projection: if lcvar.as_str() == var {
+                projection.clone()
+            } else {
+                projection.as_deref().map(|p| Box::new(subst_var(p, var, val)))
+            },
+        },
+        // For other complex variants (Aggregate, PatternComprehension, etc.)
+        // leave as-is.
         _ => expr.clone(),
     }
 }
@@ -8165,10 +8285,44 @@ fn range_arg_is_static(expr: &Expr) -> bool {
     }
 }
 
+/// Evaluate a constant numeric `Expr` to an `f64`.  Returns `None` if the
+/// expression contains variables or non-numeric sub-expressions.
+fn try_eval_numeric_lqa(e: &Expr) -> Option<f64> {
+    use crate::lqa::expr::UnaryOp;
+    match e {
+        Expr::Literal(Literal::Integer(n)) => Some(*n as f64),
+        Expr::Literal(Literal::Float(f)) => Some(*f),
+        Expr::Unary(UnaryOp::Neg, inner) => Some(-try_eval_numeric_lqa(inner)?),
+        Expr::Add(a, b) => Some(try_eval_numeric_lqa(a)? + try_eval_numeric_lqa(b)?),
+        Expr::Sub(a, b) => Some(try_eval_numeric_lqa(a)? - try_eval_numeric_lqa(b)?),
+        Expr::Mul(a, b) => Some(try_eval_numeric_lqa(a)? * try_eval_numeric_lqa(b)?),
+        Expr::Div(a, b) => {
+            let bv = try_eval_numeric_lqa(b)?;
+            if bv == 0.0 { return None; }
+            Some(try_eval_numeric_lqa(a)? / bv)
+        }
+        Expr::Mod(a, b) => {
+            let bv = try_eval_numeric_lqa(b)?;
+            if bv == 0.0 { return None; }
+            let av = try_eval_numeric_lqa(a)?;
+            Some(av - (av / bv).floor() * bv)
+        }
+        Expr::Pow(a, b) => {
+            let bv = try_eval_numeric_lqa(b)?;
+            Some(try_eval_numeric_lqa(a)?.powf(bv))
+        }
+        Expr::FunctionCall { name, args, .. } if name.eq_ignore_ascii_case("abs") => {
+            Some(try_eval_numeric_lqa(args.first()?)?.abs())
+        }
+        _ => None,
+    }
+}
+
 /// Evaluate a constant boolean `Expr`. Returns `Some(Some(bool))` if the expression
 /// is statically known, `Some(None)` for null, or `None` if it cannot be determined
 /// at compile time.
 fn try_eval_bool_const_lqa(e: &Expr) -> Option<Option<bool>> {
+    use crate::lqa::expr::CmpOp;
     match e {
         Expr::Literal(Literal::Boolean(b)) => Some(Some(*b)),
         Expr::Literal(Literal::Null) => Some(None),
@@ -8186,6 +8340,31 @@ fn try_eval_bool_const_lqa(e: &Expr) -> Option<Option<bool>> {
             (Some(Some(false)), Some(Some(false))) => Some(Some(false)),
             _ => None,
         },
+        // Arithmetic comparison with constant operands.
+        Expr::Comparison(op, a, b) => {
+            // Try numeric comparison first.
+            if let (Some(av), Some(bv)) = (try_eval_numeric_lqa(a), try_eval_numeric_lqa(b)) {
+                return Some(Some(match op {
+                    CmpOp::Eq => (av - bv).abs() < f64::EPSILON,
+                    CmpOp::Ne => (av - bv).abs() >= f64::EPSILON,
+                    CmpOp::Lt => av < bv,
+                    CmpOp::Le => av <= bv,
+                    CmpOp::Gt => av > bv,
+                    CmpOp::Ge => av >= bv,
+                    _ => return None,
+                }));
+            }
+            // Try string / boolean literal comparison.
+            match (a.as_ref(), b.as_ref(), op) {
+                (Expr::Literal(la), Expr::Literal(lb), CmpOp::Eq) => {
+                    Some(Some(format!("{la:?}") == format!("{lb:?}")))
+                }
+                (Expr::Literal(la), Expr::Literal(lb), CmpOp::Ne) => {
+                    Some(Some(format!("{la:?}") != format!("{lb:?}")))
+                }
+                _ => None,
+            }
+        }
         _ => None,
     }
 }
